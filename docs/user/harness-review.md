@@ -14,7 +14,8 @@ under `<workspace>/.houston/harness/<run>/`:
   your user-level copies in `~/.claude/skills`), permission lists, hook counts and MCP servers.
 - `digest.jsonl`: one line per Claude Code or Codex session whose working directory is this
   workspace or below it, within the run's window: your prompts, the skills and subagents used,
-  tool failures, permission denials, interrupts, and the last assistant message.
+  tool failures, permission denials with the command that was denied (secrets in it masked),
+  interrupts, counts of the automatic messages the CLI injected, and the last assistant message.
 
 The agent then reads those files, which sends their content to the routine's provider through
 your own CLI, as any turn of that agent does. Nothing else leaves the machine, Houston keeps

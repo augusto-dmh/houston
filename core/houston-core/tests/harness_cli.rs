@@ -460,7 +460,7 @@ fn digest_claude_session_fields_match_fixture() {
     assert_eq!(s["start"], "2026-09-12T10:00:00Z");
     assert_eq!(s["end"], "2026-09-12T10:30:00Z");
     assert_eq!(s["minutes"], 30);
-    assert_eq!(s["models"]["claude-opus-5-5"], 6);
+    assert_eq!(s["models"]["claude-opus-5-5"], 8);
     assert_eq!(s["skills"]["grilling"], 1);
     assert_eq!(s["skill_sources"]["/home/user/.claude/skills/grilling"], 1);
     assert_eq!(s["subagents"][0]["type"], "Explore");
@@ -649,4 +649,44 @@ fn digest_refuses_over_the_total_cap_through_the_binary() {
     assert!(err.contains("2097152 byte cap"), "{err}");
     assert!(err.contains("40 sessions"), "{err}");
     assert!(!f.run_dir("r7").join("digest.jsonl").exists());
+}
+
+#[test]
+fn digest_counts_automatic_messages_and_how_they_were_answered() {
+    let f = Fixture::new().with_transcripts();
+    let (lines, _) = f.digest();
+    let s = session(&lines, MAIN);
+    assert_eq!(s["automatic"]["another_session"], 1);
+    assert_eq!(s["automatic"]["task_notification"], 1);
+    assert_eq!(s["automatic_answered_with_text"]["another_session"], 1);
+    assert_eq!(
+        s["automatic_answered_with_text"]["task_notification"],
+        Value::Null,
+        "answered with a tool call, not prose"
+    );
+    assert!(s["automatic_reply_samples"][0]
+        .as_str()
+        .unwrap()
+        .starts_with("That was an automatic notification"));
+    let texts: Vec<&str> = s["prompts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["text"].as_str().unwrap())
+        .collect();
+    assert!(texts
+        .iter()
+        .all(|t| !t.starts_with("Another Claude session")));
+}
+
+#[test]
+fn digest_keeps_the_command_the_classifier_denied() {
+    let f = Fixture::new().with_transcripts();
+    let (lines, _) = f.digest();
+    let denied = session(&lines, MAIN)["denied"].as_array().unwrap().clone();
+    assert_eq!(denied.len(), 1);
+    assert_eq!(denied[0]["kind"], "automode-blocked");
+    assert_eq!(denied[0]["tool"], "Bash");
+    assert_eq!(denied[0]["input"], "git reset --hard");
+    assert_eq!(denied[0]["reason"], "[Git Destructive].");
 }

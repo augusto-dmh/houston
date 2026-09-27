@@ -26,6 +26,10 @@ const LAST_TEXT_MAX_CHARS: usize = 2_000;
 const REASON_MAX_CHARS: usize = 200;
 const ERROR_SAMPLE_CHARS: usize = 200;
 const ERROR_SAMPLES_PER_TOOL: usize = 3;
+/// Enough denied calls to show a pattern without carrying a session's log.
+const DENIED_PER_SESSION: usize = 10;
+const DENIED_INPUT_CHARS: usize = 200;
+const AUTOMATIC_REPLY_SAMPLES: usize = 3;
 /// How far into a file the cwd and first timestamp are looked for.
 const PEEK_LINES: usize = 40;
 
@@ -60,6 +64,14 @@ const MACHINE_STRINGS: [(&str, &str); 6] = [
     ),
     ("interrupted_by_user", "Request interrupted by user"),
     ("usage_limit_reset", "Your claude.ai usage limit has reset"),
+];
+
+/// Messages the harness injects as user turns. Counted, never read as prompts:
+/// an assistant that answers one with prose instead of acting is friction.
+const AUTOMATIC_PREFIXES: [(&str, &str); 3] = [
+    ("another_session", "Another Claude session sent"),
+    ("task_notification", "<task-notification>"),
+    ("fork_notice", "The fork runs as its own"),
 ];
 
 const CLASSIFIER_PREFIX: &str =
@@ -168,6 +180,12 @@ struct Session {
     last_assistant_text: Option<String>,
     machine: BTreeMap<&'static str, u64>,
     tool_names: HashMap<String, String>,
+    tool_inputs: HashMap<String, String>,
+    denied: Vec<Value>,
+    automatic: BTreeMap<&'static str, u64>,
+    automatic_answered: BTreeMap<&'static str, u64>,
+    automatic_reply_samples: Vec<String>,
+    pending_automatic: Option<&'static str>,
 }
 
 impl Session {
@@ -303,10 +321,24 @@ fn feed_claude_user(
                     Some("tool_result") => {
                         let body = text_of(b.get("content").unwrap_or(&Value::Null));
                         s.count_machine(&body);
-                        if let Some(reason) = body.strip_prefix(CLASSIFIER_PREFIX) {
-                            let reason = reason.split(" If you have other tasks").next();
-                            let reason = cap_chars(reason.unwrap_or("").trim(), REASON_MAX_CHARS);
-                            *s.classifier_reasons.entry(reason).or_default() += 1;
+                        let mut reason = None;
+                        if let Some(r) = body.strip_prefix(CLASSIFIER_PREFIX) {
+                            let r = r.split(" If you have other tasks").next();
+                            let r = cap_chars(r.unwrap_or("").trim(), REASON_MAX_CHARS);
+                            *s.classifier_reasons.entry(r.clone()).or_default() += 1;
+                            reason = Some(r);
+                        }
+                        let kind = str_at(o, "toolDenialKind");
+                        if (kind.is_some() || reason.is_some())
+                            && s.denied.len() < DENIED_PER_SESSION
+                        {
+                            let id = str_at(b, "tool_use_id");
+                            s.denied.push(json!({
+                                "kind": kind.unwrap_or("automode-blocked"),
+                                "tool": id.and_then(|id| s.tool_names.get(id)),
+                                "input": id.and_then(|id| s.tool_inputs.get(id)),
+                                "reason": reason,
+                            }));
                         }
                         if b.get("is_error").and_then(Value::as_bool) == Some(true) {
                             let name = str_at(b, "tool_use_id")
@@ -324,6 +356,13 @@ fn feed_claude_user(
     for t in texts {
         s.count_machine(&t);
         let trimmed = t.trim_start();
+        if let Some((kind, _)) = AUTOMATIC_PREFIXES
+            .iter()
+            .find(|(_, prefix)| trimmed.starts_with(prefix))
+        {
+            *s.automatic.entry(kind).or_default() += 1;
+            s.pending_automatic = Some(kind);
+        }
         if trimmed.starts_with("[Request interrupted") {
             s.interrupts += 1;
         }
@@ -339,6 +378,7 @@ fn feed_claude_user(
             }
         }
         if let Some(p) = human_prompt(&t) {
+            s.pending_automatic = None;
             s.prompts.push(Prompt {
                 at: ts.unwrap_or("").to_string(),
                 text: p,
@@ -347,6 +387,16 @@ fn feed_claude_user(
             });
         }
     }
+}
+
+/// What a denied call tried, bounded and with secrets masked, so a review can
+/// name the allow or deny rule it would take.
+fn tool_input_summary(input: &Value) -> String {
+    let raw = ["command", "file_path", "url", "pattern"]
+        .iter()
+        .find_map(|k| str_at(input, k).map(str::to_string))
+        .unwrap_or_else(|| input.to_string());
+    crate::sanitize::redact_command_secrets(&cap_chars(&raw, DENIED_INPUT_CHARS)).0
 }
 
 fn feed_claude_assistant(s: &mut Session, o: &Value) {
@@ -362,15 +412,25 @@ fn feed_claude_assistant(s: &mut Session, o: &Value) {
             Some("text") => {
                 if let Some(t) = str_at(b, "text").filter(|t| !t.trim().is_empty()) {
                     s.last_assistant_text = Some(t.to_string());
+                    if let Some(kind) = s.pending_automatic.take() {
+                        *s.automatic_answered.entry(kind).or_default() += 1;
+                        if s.automatic_reply_samples.len() < AUTOMATIC_REPLY_SAMPLES {
+                            s.automatic_reply_samples
+                                .push(cap_chars(t.trim(), ERROR_SAMPLE_CHARS));
+                        }
+                    }
                 }
             }
             Some("tool_use") => {
+                s.pending_automatic = None;
                 let name = str_at(b, "name").unwrap_or("unknown").to_string();
                 *s.tools.entry(name.clone()).or_default() += 1;
+                let input = b.get("input").unwrap_or(&Value::Null);
                 if let Some(id) = str_at(b, "id") {
                     s.tool_names.insert(id.to_string(), name.clone());
+                    s.tool_inputs
+                        .insert(id.to_string(), tool_input_summary(input));
                 }
-                let input = b.get("input").unwrap_or(&Value::Null);
                 if name == "Skill" {
                     if let Some(skill) = str_at(input, "skill") {
                         *s.skills.entry(skill.to_string()).or_default() += 1;
@@ -753,6 +813,10 @@ fn session_value(s: &Session, prompts: &[Prompt], dropped: usize) -> Value {
         "reasks": reasks,
         "last_assistant_text": s.last_assistant_text.as_deref().map(|t| cap_chars(t, LAST_TEXT_MAX_CHARS)),
         "machine": machine,
+        "automatic": s.automatic,
+        "automatic_answered_with_text": s.automatic_answered,
+        "automatic_reply_samples": s.automatic_reply_samples,
+        "denied": s.denied,
     })
 }
 
@@ -991,6 +1055,25 @@ mod tests {
         assert!(!is_review_run(&stub));
         assert!(is_review_run(&format!("{REVIEW_MARKER}\nrest")));
         assert!(!is_review_run("Make the export button work"));
+    }
+
+    #[test]
+    fn denied_input_is_bounded_and_masks_secrets() {
+        let v = tool_input_summary(&json!({
+            "command": "API_TOKEN=abc123 curl -H 'Authorization: Bearer s3cr3tv4lue' https://x"
+        }));
+        assert!(!v.contains("abc123") && !v.contains("s3cr3tv4lue"), "{v}");
+        assert!(v.contains("curl"), "{v}");
+        let long = tool_input_summary(&json!({ "command": "x".repeat(500) }));
+        assert!(
+            long.chars().count() <= DENIED_INPUT_CHARS + 1,
+            "{}",
+            long.len()
+        );
+        assert_eq!(
+            tool_input_summary(&json!({ "file_path": "/a/b.md" })),
+            "/a/b.md"
+        );
     }
 
     fn claude_line(ts: &str, text: &str) -> String {
