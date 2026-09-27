@@ -31,6 +31,10 @@ keep its definition and stop future scheduled runs.
 Expand a routine's history to see each run's trigger, status, time and error. A run with a
 session link can reopen its pane. Runs do not reuse a previous conversation or context.
 
+With orchestration enabled, a run's agent can hand its result back with `pane_submit` (or
+`hs-pane submit`); the result and any files it names arrive in the workspace's inbox under the
+bell. See [Harness review](harness-review.md) for a routine built on this.
+
 Houston runs at most three routines at once and queues due work until a slot is free. If the
 daemon was not running when a schedule elapsed, the routine runs once when the daemon returns;
 it does not replay every missed interval.

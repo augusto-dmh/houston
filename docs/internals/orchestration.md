@@ -56,6 +56,7 @@ spelling, or a verb that is CLI-only).
 | `pane_submit` | `mcp_orchestration.rs` | `hs-pane submit` | worker→parent result handoff, with an optional summary and artifact paths; wakes the parent |
 | — | — | `hs-pane keys` | press a small set of keys in a pane (the CLI-only spelling of `pane_send_keys`) |
 | `pane_send_keys` | `mcp_orchestration.rs` | — | press a small set of keys in a pane (see the tool's own description for the list) |
+| — | — | `hs-harness` | not a pane verb: the extractor a harness review run calls (`inventory`, `digest`, `preset`); its wrapper sits beside `hs-pane`, and `digest` refuses outside a routine run (carve-out #6 in `invariants.md`) |
 | `browser_current_page` | `src-tauri/src/browser/mcp_tools.rs` | — | URL, title, favicon, loading state |
 | `browser_capture` | `mcp_tools.rs` | — | PNG screenshot of the browser pane |
 | `browser_navigate` | `mcp_tools.rs` | — | load an http(s) URL, opening a pane at it when the workspace has none |
@@ -75,7 +76,10 @@ and optional `model`, `cwd`, `target_workspace`, `reusable`, `effort`, `auto_app
 workspace after canonicalization, and `cwd` must remain under that root. `reusable` defaults
 to false for new API spawns; legacy delegation rows migrate as reusable to preserve their
 prior behavior. `effort` is provider-validated at the launch boundary.
-`pane_submit` takes `body` and optional `summary`, `artifacts`, `request_id`.
+`pane_submit` takes `body` and optional `summary`, `artifacts`, `request_id`. A pane nobody
+spawned has nobody to submit to and is refused, except a routine run's pane: its hand-back is
+what the operator asked for by creating the routine, so it becomes an operator-inbox row with
+`reason = "routine"`.
 
 `orchestrate.rs` is the pure layer under all of it — no DB, no PTY: scope and cap
 verdicts, wait and stall decisions, inbox composition and the sub-agent and permission
