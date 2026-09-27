@@ -9,14 +9,15 @@ You are reviewing the agent harness of this workspace: its instruction files (CL
 1. Run `hs-harness inventory`. It prints the path of `inventory.json` inside this run's directory, `.houston/harness/<run>/`. Read it.
 2. Run `hs-harness digest`. It picks the window itself (the first review reads 14 days; later reviews read from the previous review's end, between 7 and 30 days) and writes `digest.jsonl` (one JSON object per session) and `digest-meta.json` beside the inventory. If it refuses, report the refusal text as your result and stop.
 3. Read `digest-meta.json` first: the window, `available_from` (the oldest transcript still on disk; if it is later than the window's start, say so in the report), and the counts of sessions skipped and why.
-4. Read `digest.jsonl` in full. Each line has the session's human prompts, skills and which copy of each skill loaded (`skill_sources`), subagents with their model, tool counts and failures, permission denials and classifier reasons, interrupts, compactions, forks, friction matches, re-asks, the last assistant text, and counters of machine messages.
+4. Read `digest.jsonl` in full. Each line has the session's human prompts, skills and which copy of each skill loaded (`skill_sources`), subagents with their model, tool counts and failures, permission denials with the denied command and the classifier's reason (`denied`), interrupts, compactions, forks, friction matches, re-asks, the last assistant text, counters of machine messages, and the automatic messages the harness injected (`automatic`) with how many the assistant answered with prose instead of acting (`automatic_answered_with_text`, with sample replies).
 5. If an earlier review exists (another directory under `.houston/harness/` with a `findings.json`), read the most recent `findings.json`. Do not re-propose a finding it recorded unless this window has new evidence for it; when a finding recurs, keep its `key` and set `recurrence_of` to the earlier finding's `id`.
 6. Cross-check what the sessions show against the inventory and the harness files themselves. Open the files you cite. Ask: is there a rule or skill for this? Is it loaded from the directory the sessions ran in? Does it say the opposite? Is a skill never used, or shadowed by the user's own copy?
 
 ## What counts as a finding
 
 - A pain the user repeated: the same ask across sessions, re-asks, corrections, friction matches, interrupts.
-- Harness friction: guard refusals, blocked commands, classifier denials, tool failures that recur, MCP failures, compactions.
+- Recurring asks no skill serves: the same kind of request across sessions for which the inventory has no skill or rule, or has one that never loaded in those sessions.
+- Harness friction: guard refusals, blocked commands, classifier denials (name the denied commands, so a settings rule can be proposed), tool failures that recur, MCP failures, compactions, automatic messages answered with prose.
 - Judgment errors the harness could have prevented: a subagent where none was needed, work on the wrong checkout or branch, claims made without checking.
 - Dead or misleading harness: skills never invoked, rules that never load, instructions that contradict each other.
 
@@ -30,7 +31,9 @@ Write both files into the same run directory as `inventory.json`.
 
 1. The problem: what happens and what it costs, with the number of sessions.
 2. How to see it: session ids, dates and one or two short quotes.
-3. Recommendation: the exact target file and the change, and how it should be enforced (text in an instruction file, a hook, a test or lint, a settings allow or deny rule).
+3. Recommendation: the exact target file and the change, and how it should be enforced (text in an instruction file, a hook, a test or lint, a settings allow or deny rule). Read the target as it is today: the harness on disk may be newer than the window, so say explicitly whether the recommendation still holds against the current file, and propose only what is still missing.
+
+A pattern the current harness already handles is not a recommendation. Put it in a short section "Already handled: re-count next run" with its counts, and in `findings.json` give it `"kind": "recount"`, the file that handles it as `target`, and "re-count in the next run" as `summary`.
 
 End with the findings you considered and rejected, one line each.
 
@@ -55,7 +58,7 @@ End with the findings you considered and rejected, one line each.
       "title": "One line",
       "evidence": { "sessions": ["<session id prefix>"], "count": 0, "quotes": ["<short quote>"] },
       "recommendation": {
-        "kind": "claude-md | add-rule | edit-skill | new-skill | hook | test-or-lint | settings-allow | settings-deny | mcp | docs",
+        "kind": "claude-md | add-rule | edit-skill | new-skill | hook | test-or-lint | settings-allow | settings-deny | mcp | docs | recount",
         "target": "<path relative to the workspace>",
         "summary": "What to change, in one or two sentences",
         "apply_prompt": "A prompt another agent could follow to make exactly this change"

@@ -345,6 +345,12 @@ mod tests {
             "hs-pane submit",
             "in the language most of the session prompts are written in",
             "Do not edit CLAUDE.md, AGENTS.md, rules, skills, settings or hooks",
+            "Recurring asks no skill serves",
+            "say explicitly whether the recommendation still holds against the current file",
+            "Already handled: re-count next run",
+            "\"kind\": \"recount\"",
+            "automatic_answered_with_text",
+            "`denied`",
         ] {
             assert!(
                 HARNESS_REVIEW_PROMPT.contains(needle),
