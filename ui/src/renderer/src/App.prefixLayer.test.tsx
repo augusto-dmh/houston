@@ -50,6 +50,54 @@ async function settle(): Promise<void> {
   })
 }
 
+// Runs a palette command by title, the way a user does: open, type, Enter.
+// A null pane opens it with no terminal focused, through the window dispatcher.
+async function runFromPalette(h: AppHarness, id: number | null, title: string): Promise<void> {
+  if (id !== null) {
+    focusPane(h, id)
+    termKey({ code: 'Space', key: ' ', ctrlKey: true })
+    termKey({ code: 'Space', key: ' ' })
+  } else {
+    act(() => {
+      h.container.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }))
+    })
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { code: 'KeyK', key: 'k', ctrlKey: true, cancelable: true })
+      )
+    })
+  }
+  await settle()
+  typeSearch(title)
+  const first = document.querySelector('[data-testid="command-palette-row"][aria-selected="true"]')
+  if (first?.textContent?.startsWith(title) !== true) throw new Error(`palette did not rank "${title}" first`)
+  const search = document.querySelector('[data-testid="command-palette-search"]') as HTMLInputElement
+  act(() => {
+    search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+  })
+  // The palette leaves through an exit animation; the next open must not find this one.
+  for (let t = 0; document.querySelector('[data-testid="command-palette"]') !== null; t += 20) {
+    if (t > 2000) throw new Error('palette did not close after running a command')
+    await wait(20)
+  }
+  await settle()
+}
+
+function typeSearch(value: string): void {
+  const search = document.querySelector('[data-testid="command-palette-search"]')
+  if (!(search instanceof HTMLInputElement)) throw new Error('palette is not open')
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!
+  act(() => {
+    setter.call(search, value)
+    search.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
+function selectedGridName(h: AppHarness): string | null {
+  const row = h.container.querySelector('[data-testid="grid-row"][data-selected="true"]')
+  return row?.textContent ?? null
+}
+
 async function wait(ms: number): Promise<void> {
   await act(async () => {
     await new Promise((r) => setTimeout(r, ms))
@@ -175,4 +223,54 @@ describe('prefix layer from a focused terminal', () => {
     expect(termKey({ code: 'KeyN', key: 'n' })).toBe(true)
     expect(paneVisible(h, 1)).toBe(true)
   }, 15000)
+
+  it('palette next and previous workspace step in sidebar order and wrap', async () => {
+    h = await boot()
+    await runFromPalette(h, 1, 'Next workspace')
+    expect(paneVisible(h, 2)).toBe(true)
+    expect(paneVisible(h, 1)).toBe(false)
+    await runFromPalette(h, 2, 'Next workspace')
+    expect(paneVisible(h, 1)).toBe(true)
+    await runFromPalette(h, 1, 'Previous workspace')
+    expect(paneVisible(h, 2)).toBe(true)
+  })
+
+  it('palette last workspace returns to the one selected before', async () => {
+    h = await boot()
+    await runFromPalette(h, 1, 'Next workspace')
+    expect(paneVisible(h, 2)).toBe(true)
+    await runFromPalette(h, 2, 'Last workspace')
+    expect(paneVisible(h, 1)).toBe(true)
+    expect(paneVisible(h, 2)).toBe(false)
+  })
+
+  it('palette next grid moves to the other grid of the workspace and wraps back', async () => {
+    localStorage.setItem(
+      `tr-grids:${A}`,
+      JSON.stringify([
+        { id: 'g-default', name: 'alpha', named: true },
+        { id: 'g-beta', name: 'beta', named: true }
+      ])
+    )
+    h = await boot()
+    expect(selectedGridName(h)).toContain('alpha')
+    await runFromPalette(h, 1, 'Next grid')
+    expect(selectedGridName(h)).toContain('beta')
+    await runFromPalette(h, null, 'Next grid')
+    expect(selectedGridName(h)).toContain('alpha')
+  })
+
+  it('a single grid disables Next grid with a named reason', async () => {
+    h = await boot()
+    focusPane(h, 1)
+    termKey({ code: 'Space', key: ' ', ctrlKey: true })
+    termKey({ code: 'Space', key: ' ' })
+    await settle()
+    typeSearch('Next grid')
+    const row = document.querySelector('[data-command-id="grid.next"]')
+    expect(row).not.toBeNull()
+    expect(row!.querySelector('[data-testid="command-palette-row-reason"]')?.textContent).toBe(
+      'Open a second grid to switch grids'
+    )
+  })
 })

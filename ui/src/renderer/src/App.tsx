@@ -202,7 +202,11 @@ import {
 import { prefixLayer } from "./prefixLayer";
 import { PrefixHint } from "./components/PrefixHint";
 import { CommandPalette } from "./components/CommandPalette";
-import type { GridTarget, PaletteActions } from "./components/commandRegistry";
+import {
+  paletteNavActions,
+  type GridTarget,
+  type PaletteActions,
+} from "./components/commandRegistry";
 import { KeymapOverridesContext } from "./layout/keymapOverridesContext";
 import { setRailView, useRailView, type RailView } from "./railView";
 import { touchGrid } from "./gridRecency";
@@ -1018,12 +1022,17 @@ export function App(): React.JSX.Element {
     },
     [orderedWorkspaces, selectedWs, selectWorkspaceFromKeyboard],
   );
-  const selectLastWorkspace = useCallback((): void => {
+  const lastWorkspace = useCallback((): string | null => {
     const last = lastWsRef.current;
-    if (last === null) return;
-    if (last !== "all" && !workspaces.some((w) => w.path === last)) return;
-    selectWorkspaceFromKeyboard(last);
-  }, [workspaces, selectWorkspaceFromKeyboard]);
+    if (last === null) return null;
+    return last === "all" || workspaces.some((w) => w.path === last)
+      ? last
+      : null;
+  }, [workspaces]);
+  const selectLastWorkspace = useCallback((): void => {
+    const last = lastWorkspace();
+    if (last !== null) selectWorkspaceFromKeyboard(last);
+  }, [lastWorkspace, selectWorkspaceFromKeyboard]);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   const sessionsRef = useRef(sessions);
@@ -3329,6 +3338,15 @@ export function App(): React.JSX.Element {
       setShowLauncher(false);
     },
     switchGrid: handleSelectGrid,
+    ...paletteNavActions({
+      workspaceCount: orderedWorkspaces.length,
+      lastWorkspace: lastWorkspace(),
+      selectedWs,
+      gridsFor,
+      stepWorkspace,
+      selectLastWorkspace,
+      stepGrid,
+    }),
   };
 
   return (

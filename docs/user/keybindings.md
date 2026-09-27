@@ -42,7 +42,9 @@ The prefix can be rebound in Settings ▸ Shortcuts but not unbound; only **Enab
 shortcuts** turns it off, together with every other Houston chord. `Esc`, `Ctrl+C`,
 `Shift+Tab`, `Ctrl+B`, `Ctrl+K`, `Ctrl+L` and `Ctrl+R` keep reaching the agent as before.
 Two shortcuts exist only after the prefix, because their keys mean something on their
-own: `Tab` (last workspace) and `Space` (command palette).
+own: `Tab` (last workspace) and `Space` (command palette). The workspace and grid moves
+are also in the command palette, as Previous / Next / Last workspace and Previous / Next
+grid.
 
 The prefix works while a terminal pane, or no pane, has focus. It does not work while a
 browser pane has focus, because that pane is a native webview whose keys never reach
