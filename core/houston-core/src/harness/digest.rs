@@ -470,6 +470,20 @@ fn codex_tool_name(s: &Session, payload: &Value, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// A prompt too long for argv (and any multi-line one on Windows) reaches the
+/// CLI as a "Read the file <path> …" stub, so the marker is looked for there too.
+fn is_review_run(first_prompt: &str) -> bool {
+    let text = first_prompt.trim_start();
+    if text.starts_with(REVIEW_MARKER) {
+        return true;
+    }
+    text.strip_prefix("Read the file ")
+        .and_then(|rest| rest.split(" and follow every instruction").next())
+        .filter(|path| path.contains(".houston"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|brief| brief.trim_start().starts_with(REVIEW_MARKER))
+}
+
 #[derive(Debug, Default)]
 pub struct Tally {
     pub files_listed: u64,
@@ -819,10 +833,7 @@ pub fn run(req: &Request) -> Result<Outcome> {
             tally.out_of_window += 1;
             continue;
         }
-        if s.prompts
-            .first()
-            .is_some_and(|p| p.text.trim_start().starts_with(REVIEW_MARKER))
-        {
+        if s.prompts.first().is_some_and(|p| is_review_run(&p.text)) {
             tally.self_runs_skipped += 1;
             continue;
         }
@@ -958,6 +969,25 @@ mod tests {
             v["prompts_dropped"].as_u64().unwrap() as usize + kept.len(),
             300
         );
+    }
+
+    #[test]
+    fn review_run_launched_through_a_prompt_file_is_recognised() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompts = dir.path().join(".houston").join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        let brief = prompts.join("prompt-session.md");
+        std::fs::write(&brief, format!("{REVIEW_MARKER}\n\nWhat this run sends")).unwrap();
+        let stub = format!(
+            "Read the file {} and follow every instruction in it exactly. It is your full \
+             mission brief for this job; start working immediately.",
+            brief.display()
+        );
+        assert!(is_review_run(&stub));
+        std::fs::write(&brief, "an ordinary brief").unwrap();
+        assert!(!is_review_run(&stub));
+        assert!(is_review_run(&format!("{REVIEW_MARKER}\nrest")));
+        assert!(!is_review_run("Make the export button work"));
     }
 
     fn claude_line(ts: &str, text: &str) -> String {
