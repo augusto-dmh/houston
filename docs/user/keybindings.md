@@ -49,7 +49,9 @@ grid.
 The prefix works while a terminal pane, or no pane, has focus. It does not work while a
 browser pane has focus, because that pane is a native webview whose keys never reach
 Houston's window, nor while an editor pane has focus, where the keys go to the editor;
-click outside the pane first.
+click outside the pane first. While a dictation is running in the focused pane, the
+prefix does nothing and `Ctrl+Space` reaches the terminal, so it cannot cut the
+dictation short.
 
 ## Not every shortcut is rebindable
 

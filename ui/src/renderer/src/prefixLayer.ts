@@ -76,8 +76,14 @@ export function forwardLayerKey(e: KeyboardEvent): void {
 }
 
 // True when the layer took the key; false when it is the terminal's, including a second
-// prefix press, which sends the chord itself.
-export function claimLayerKey(e: KeyboardEvent, overrides: KeymapOverrides): boolean {
+// prefix press (it sends the chord itself) and any prefix while the pane is dictating,
+// so the prefix never arms over a dictation in progress.
+export function claimLayerKey(
+  e: KeyboardEvent,
+  overrides: KeymapOverrides,
+  dictating: boolean
+): boolean {
+  if (dictating) return false
   if (resolveGlobalMatch(prefixShortcut, overrides)(e)) {
     if (armed) {
       prefixLayer.disarm()

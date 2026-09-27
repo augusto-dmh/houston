@@ -42,7 +42,7 @@ import { BTN_ICO } from '../components/buttonChrome'
 
 const DROPZONE_FILE_ICON = resolveTightGlyph(IconFileDown, 'ui')
 import { registerVoiceInsert, registerVoiceNotice } from '../voice/store'
-import { abandonDictation, voiceChordDown, voiceChordUp } from '../voice/dictation'
+import { abandonDictation, dictationActiveFor, voiceChordDown, voiceChordUp } from '../voice/dictation'
 import { SPIN_CLASS } from '../components/git/DiffBody'
 import { outputText, stripBoxGlyphs as stripBox } from './copyOutput'
 import {
@@ -554,9 +554,8 @@ export function TerminalPane({
         return false
       }
       // Prefix layer. ghostty stops propagation of every key it encodes, so the
-      // prefix has to be recognised here, before the encode; the key that follows
-      // it is re-emitted on window for the app dispatcher.
-      if (claimLayerKey(e, keymapOverridesRef.current)) {
+      // prefix is recognised here, before the encode.
+      if (claimLayerKey(e, keymapOverridesRef.current, dictationActiveFor(info.id))) {
         e.preventDefault()
         return false
       }
