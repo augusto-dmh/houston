@@ -375,6 +375,22 @@ describe('TerminalPane prefix layer', () => {
     expect(prefixLayer.isArmed()).toBe(true)
   })
 
+  it('pass-through keeps the prefix: it still arms while other governed chords reach the terminal', async () => {
+    setPaneCapsForTests({ passThrough: true })
+    try {
+      await render()
+      expect(
+        ghosttyMock.emitKey(new KeyboardEvent('keydown', { code: 'Equal', ctrlKey: true }))
+      ).toBe(true)
+      expect(
+        ghosttyMock.emitKey(new KeyboardEvent('keydown', { code: 'Space', key: ' ', ctrlKey: true }))
+      ).toBe(false)
+      expect(prefixLayer.isArmed()).toBe(true)
+    } finally {
+      setPaneCapsForTests({ passThrough: false })
+    }
+  })
+
   it('a bare modifier while armed keeps the layer armed', async () => {
     await render()
     ghosttyMock.emitKey(new KeyboardEvent('keydown', { code: 'Space', key: ' ', ctrlKey: true }))

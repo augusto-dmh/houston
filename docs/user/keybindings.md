@@ -16,7 +16,8 @@ daemon, not a text file you hand-edit.
 Settings ▸ Shortcuts has a **Pass through to terminal** toggle (off by default). With it
 off, a focused pane still receives Houston's remappable chords as Houston shortcuts
 first. Turn it on and a focused pane gets those same chords sent to the process running
-in it instead of acting on them in Houston.
+in it instead of acting on them in Houston. The prefix key (below) is the exception: it
+stays with Houston either way, so the keyboard always has a way out of a terminal.
 
 This does not cover the terminal-native clipboard and find actions. `Ctrl+C` copies when
 there is a selection and otherwise reaches the PTY as an interrupt. `Ctrl+Shift+C` always
