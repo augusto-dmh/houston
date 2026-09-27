@@ -351,6 +351,7 @@ mod tests {
             "\"kind\": \"recount\"",
             "automatic_answered_with_text",
             "`denied`",
+            "at most 200 characters",
         ] {
             assert!(
                 HARNESS_REVIEW_PROMPT.contains(needle),
