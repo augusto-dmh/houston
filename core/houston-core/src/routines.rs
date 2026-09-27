@@ -267,7 +267,7 @@ pub fn revision(
 
 /// The Houston-authored prompt of a harness review run; its first line is the
 /// marker `hs-harness digest` uses to leave review runs out of later digests.
-pub const HARNESS_REVIEW_PROMPT: &str = include_str!("harness_review_prompt.md");
+pub const HARNESS_REVIEW_PROMPT: &str = include_str!("harness_review_prompt.txt");
 
 /// A harness review routine as created, before the user touches it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
