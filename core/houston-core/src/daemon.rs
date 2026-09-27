@@ -4337,6 +4337,23 @@ impl Daemon {
         )
     }
 
+    /// The Harness review routine for `workspace`, created paused.
+    pub fn harness_review_create(&self, workspace: &str) -> Result<proto::ServerMsg> {
+        let p = crate::routines::harness_review_preset(workspace);
+        self.routine_create_impl(
+            &p.name,
+            &p.prompt,
+            p.cadence,
+            Some(p.workspace_id),
+            p.engine,
+            p.model,
+            p.effort,
+            Some(p.permission_mode),
+            Some(p.isolate),
+            p.enabled,
+        )
+    }
+
     /// The wire entry. `engine` is mandatory: it is the record's own, and a
     /// fire never reads execution settings off anything else.
     #[allow(clippy::too_many_arguments)]
@@ -4954,19 +4971,22 @@ impl Daemon {
                 }
             },
         };
-        let spawned = self.create_session(CreateParams {
-            agent: row.engine,
-            project_dir: PathBuf::from(&dir),
-            cmd: Some(cmd),
-            cols: 120,
-            rows: 32,
-            cwd_from: None,
-            shell_integration: false,
-            auto_approve: false,
-            acp: None,
-            profile: None,
-            prompt: Some(row.prompt.clone()),
-        });
+        let spawned = self.create_session_with_env(
+            CreateParams {
+                agent: row.engine,
+                project_dir: PathBuf::from(&dir),
+                cmd: Some(cmd),
+                cols: 120,
+                rows: 32,
+                cwd_from: None,
+                shell_integration: false,
+                auto_approve: false,
+                acp: None,
+                profile: None,
+                prompt: Some(row.prompt.clone()),
+            },
+            vec![(crate::harness::RUN_ENV.to_string(), run_id.to_string())],
+        );
         let session = match spawned {
             Ok(info) => info,
             Err(e) => {
@@ -6116,6 +6136,15 @@ impl Daemon {
     }
 
     pub fn create_session(self: &Arc<Self>, p: CreateParams) -> Result<proto::SessionInfo> {
+        self.create_session_with_env(p, Vec::new())
+    }
+
+    /// `env` is exported to the pane on top of the profile's environment.
+    fn create_session_with_env(
+        self: &Arc<Self>,
+        p: CreateParams,
+        env: Vec<(String, String)>,
+    ) -> Result<proto::SessionInfo> {
         if self.refusing_mutations() {
             bail!("refused: daemon is shutting down");
         }
@@ -6181,7 +6210,7 @@ impl Daemon {
         }
         let (profile_env, profile_label) =
             self.resolve_spawn_profile(p.agent, p.profile.as_ref())?;
-        let extra_env = profile_env.into_iter().collect::<Vec<_>>();
+        let extra_env = profile_env.into_iter().chain(env).collect::<Vec<_>>();
         let approval = if p.auto_approve {
             crate::launch::ApprovalMode::Bypass
         } else {
@@ -12636,9 +12665,13 @@ impl Daemon {
             .expect("temporary cleanup lock");
         let parent = {
             let s = self.get(child)?;
-            s.info.spawned_by.ok_or_else(|| {
-                anyhow!("session {child} was not spawned by an agent — nothing to submit to")
-            })?
+            match s.info.spawned_by {
+                Some(parent) => parent,
+                None if self.is_routine_run_pane(child) => {
+                    return self.submit_routine_run_to_operator(child, submission);
+                }
+                None => bail!("session {child} was not spawned by an agent — nothing to submit to"),
+            }
         };
         let artifacts = self.resolve_artifacts(child, &submission.artifacts)?;
         let workspace = self.current_workspace(child)?;
@@ -12702,6 +12735,73 @@ impl Daemon {
             request_id,
             reason,
             note,
+        })
+    }
+
+    fn is_routine_run_pane(&self, session: u32) -> bool {
+        self.routine_runs
+            .lock()
+            .expect("routine run lock")
+            .values()
+            .any(|run| run.session_id == Some(session))
+    }
+
+    /// A routine run's pane has no parent pane; its hand-back is the result the
+    /// operator asked for by creating the routine, so it lands in their inbox.
+    fn submit_routine_run_to_operator(
+        self: &Arc<Self>,
+        child: u32,
+        submission: orchestrate::Submission,
+    ) -> Result<orchestrate::SubmitOutcome> {
+        let artifacts = self.resolve_artifacts(child, &submission.artifacts)?;
+        let workspace = self.current_workspace(child)?;
+        let body = orchestrate::cap_submit_body(&orchestrate::sanitize_handoff_text(
+            submission.body.trim(),
+        ));
+        let summary = submission
+            .summary
+            .as_deref()
+            .map(|s| orchestrate::sanitize_handoff_text(s.trim()))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| orchestrate::submit_summary_fallback(&body));
+        let row = orchestrate::inbox_row_new(
+            0,
+            &workspace,
+            Some(child),
+            None,
+            orchestrate::InboxKind::Result,
+            &summary,
+            &body,
+            artifacts,
+            false,
+            None,
+            Some("routine"),
+            true,
+        )?;
+        let id = self.db.inbox_insert(&row, now_ms()).with_context(|| {
+            format!(
+                "storing your result failed: {} characters of body and {} of summary, against \
+                 the {} / {} caps",
+                body.len(),
+                summary.len(),
+                orchestrate::SUBMIT_BODY_MAX_CHARS,
+                orchestrate::SUBMIT_SUMMARY_MAX_CHARS
+            )
+        })?;
+        if let Some(excerpt) = self.session_handoff_excerpt(child) {
+            if let Err(e) = self.db.inbox_set_excerpt(id, &excerpt) {
+                tracing::warn!("persisting the screen excerpt for routine result {id} failed: {e}");
+            }
+        }
+        self.broadcast_inbox_row(id);
+        self.inbox_notify(0, true);
+        Ok(orchestrate::SubmitOutcome {
+            row_id: id,
+            request_id: None,
+            reason: Some("routine"),
+            note: "delivered to the operator's inbox: this pane is a routine run, and no pane \
+                   spawned it"
+                .to_string(),
         })
     }
 
@@ -14719,6 +14819,7 @@ fn init_orchestration_scope(project_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     let bin_dir = orch_dir.join("bin");
     std::fs::create_dir_all(&bin_dir).with_context(|| format!("creating {}", bin_dir.display()))?;
     write_helper_wrapper(&bin_dir, "hs-pane", "hs-pane")?;
+    write_helper_wrapper(&bin_dir, "hs-harness", "hs-harness")?;
     Ok((prompts_dir, bin_dir))
 }
 

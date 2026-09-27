@@ -291,8 +291,13 @@ pub fn harness_review_preset(workspace: &str) -> HarnessReviewPreset {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| workspace.to_string());
+    let prefix = "Harness review · ";
+    let base: String = base
+        .chars()
+        .take(ROUTINE_NAME_MAX - prefix.chars().count())
+        .collect();
     HarnessReviewPreset {
-        name: format!("Harness review · {base}"),
+        name: format!("{prefix}{base}"),
         prompt: HARNESS_REVIEW_PROMPT.to_string(),
         cadence: Cadence::Clock {
             hour: 9,
