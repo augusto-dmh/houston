@@ -218,13 +218,35 @@ async fn hook_drop_links_session_to_its_transcript() {
         })
         .unwrap();
     let db_path = state.path().join("test.db");
+    // The two link columns first, then every other column of the row as text.
+    // `detected_agent` is left out: any Claude hook drop marks it, link or not.
     let row = |id: u32| -> Vec<Option<String>> {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let mut cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('sessions')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|c| {
+                !["transcript_path", "native_session_id", "detected_agent"].contains(&c.as_str())
+            })
+            .collect();
+        cols.insert(0, "native_session_id".into());
+        cols.insert(0, "transcript_path".into());
+        let select = cols
+            .iter()
+            .map(|c| format!("CAST({c} AS TEXT)"))
+            .collect::<Vec<_>>()
+            .join(", ");
         conn.query_row(
-            "SELECT transcript_path, native_session_id, agent, project_dir, cwd, state, title
-             FROM sessions WHERE id = ?1",
+            &format!("SELECT {select} FROM sessions WHERE id = ?1"),
             [id],
-            |r| (0..7).map(|i| r.get::<_, Option<String>>(i)).collect(),
+            |r| {
+                (0..cols.len())
+                    .map(|i| r.get::<_, Option<String>>(i))
+                    .collect()
+            },
         )
         .unwrap()
     };
