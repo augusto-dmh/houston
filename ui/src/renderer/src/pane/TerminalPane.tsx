@@ -28,18 +28,8 @@ import { ExpandedContext } from '../layout/expandedContext'
 import { GridHiddenContext } from '../layout/gridHiddenContext'
 import { WarmContext } from '../layout/warmContext'
 import { KeymapOverridesContext } from '../layout/keymapOverridesContext'
-import {
-  fontZoomIn,
-  fontZoomOut,
-  fontZoomReset,
-  endsDictationHold,
-  isDictationChord,
-  isPasteChord,
-  resolveGlobalMatch,
-  zoomIn,
-  zoomOut,
-  zoomReset
-} from '../keymap'
+import { claimLayerKey } from '../prefixLayer'
+import { endsDictationHold, isDictationChord, isPasteChord, zoomHitFor } from '../keymap'
 import {
   IconArrowDown,
   IconArrowUp,
@@ -563,24 +553,18 @@ export function TerminalPane({
         e.preventDefault()
         return false
       }
-      if (!passKeysToTerminal()) {
-        const kc = keymapOverridesRef.current
-        const isZoomIn = resolveGlobalMatch(zoomIn, kc)(e)
-        const isZoomOut = resolveGlobalMatch(zoomOut, kc)(e)
-        const isZoomReset = resolveGlobalMatch(zoomReset, kc)(e)
-        if (isZoomIn || isZoomOut || isZoomReset) {
-          e.preventDefault()
-          onShellZoomRef.current(isZoomReset ? 0 : isZoomIn ? 1 : -1)
-          return false
-        }
-        const isFontIn = resolveGlobalMatch(fontZoomIn, kc)(e)
-        const isFontOut = resolveGlobalMatch(fontZoomOut, kc)(e)
-        const isFontReset = resolveGlobalMatch(fontZoomReset, kc)(e)
-        if (isFontIn || isFontOut || isFontReset) {
-          e.preventDefault()
-          onZoomRef.current(isFontReset ? 0 : isFontIn ? 1 : -1)
-          return false
-        }
+      // Prefix layer. ghostty stops propagation of every key it encodes, so the
+      // prefix has to be recognised here, before the encode; the key that follows
+      // it is re-emitted on window for the app dispatcher.
+      if (claimLayerKey(e, keymapOverridesRef.current)) {
+        e.preventDefault()
+        return false
+      }
+      const zoom = passKeysToTerminal() ? null : zoomHitFor(e, keymapOverridesRef.current)
+      if (zoom) {
+        e.preventDefault()
+        ;(zoom.target === 'app' ? onShellZoomRef : onZoomRef).current(zoom.dir)
+        return false
       }
       const shiftEnter = shiftEnterSequence(e, shiftEnterRef.current)
       if (shiftEnter !== null) {

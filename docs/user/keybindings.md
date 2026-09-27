@@ -27,6 +27,28 @@ There's a related master switch, **Enable shortcuts**, also in this section: tur
 off stops Houston from acting on any of its own chords at all (your overrides are kept,
 just not dispatched).
 
+## The prefix key
+
+With a terminal focused, every key reaches the agent, so the single-key shortcuts below
+(`t`, `]`, `1`–`9`, …) do not fire. The **prefix key**, `Ctrl+Space` by default, is the
+one chord Houston keeps for itself in that state: press it, then press a shortcut key,
+and the shortcut runs even though the terminal has the keyboard. The layer is one-shot:
+after the next key it is down again. `Esc`, or any key that is not a shortcut, cancels
+it without reaching the terminal. Pressing the prefix twice sends the chord itself to
+the terminal. If no key follows for a moment, a hint lists what the layer accepts and
+stays until you press a key; a prefix left alone for several seconds is forgotten.
+
+The prefix can be rebound in Settings ▸ Shortcuts but not unbound; only **Enable
+shortcuts** turns it off, together with every other Houston chord. `Esc`, `Ctrl+C`,
+`Shift+Tab`, `Ctrl+B`, `Ctrl+K`, `Ctrl+L` and `Ctrl+R` keep reaching the agent as before.
+Two shortcuts exist only after the prefix, because their keys mean something on their
+own: `Tab` (last workspace) and `Space` (command palette).
+
+The prefix works while a terminal pane, or no pane, has focus. It does not work while a
+browser pane has focus, because that pane is a native webview whose keys never reach
+Houston's window, nor while an editor pane has focus, where the keys go to the editor;
+click outside the pane first.
+
 ## Not every shortcut is rebindable
 
 The Shortcuts screen also lists a handful of terminal-native shortcuts marked "Not
@@ -51,6 +73,11 @@ All of the following are rebindable from Settings ▸ Shortcuts unless noted.
 | Open the Add Pane menu | Ctrl+Shift+B |
 | Close workspace | Ctrl+Shift+W |
 | Rename workspace | F2 |
+| Prefix: the next key is a Houston shortcut inside a focused terminal | Ctrl+Space |
+| Previous / next workspace | p / n |
+| Back to the last workspace (after the prefix) | Tab |
+| Previous / next grid in this workspace | , / . |
+| Open the command palette (after the prefix) | Space |
 | Select pane (visual order) | 1–9 |
 | New terminal in this workspace | t |
 | Open a file in the editor | o |
