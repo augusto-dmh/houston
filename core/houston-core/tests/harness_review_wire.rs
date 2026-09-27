@@ -4,6 +4,7 @@ mod common;
 
 use common::start_daemon_with_handle;
 use houston_core::daemon::{CreateParams, Daemon};
+use houston_core::hook_drop::{self, HookDrop};
 use houston_core::orchestrate::Submission;
 use houston_protocol as proto;
 use std::path::Path;
@@ -194,5 +195,69 @@ async fn parentless_non_routine_submit_is_still_refused() {
     assert!(
         err.contains("was not spawned by an agent — nothing to submit to"),
         "{err}"
+    );
+}
+
+#[tokio::test]
+async fn hook_drop_links_session_to_its_transcript() {
+    let (_addr, state, daemon) = start_daemon_with_handle().await;
+    let ws = workspace(state.path());
+    let info = daemon
+        .create_session(CreateParams {
+            agent: proto::AgentKind::Custom,
+            project_dir: ws,
+            cmd: Some(sleeper()),
+            cols: 80,
+            rows: 24,
+            cwd_from: None,
+            shell_integration: false,
+            auto_approve: false,
+            acp: None,
+            profile: None,
+            prompt: None,
+        })
+        .unwrap();
+    let db_path = state.path().join("test.db");
+    let row = |id: u32| -> Vec<Option<String>> {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.query_row(
+            "SELECT transcript_path, native_session_id, agent, project_dir, cwd, state, title
+             FROM sessions WHERE id = ?1",
+            [id],
+            |r| (0..7).map(|i| r.get::<_, Option<String>>(i)).collect(),
+        )
+        .unwrap()
+    };
+    let before = row(info.id);
+    assert_eq!(before[0], None);
+    assert_eq!(before[1], None);
+
+    let drop = HookDrop {
+        v: hook_drop::DROP_V,
+        event: "SessionStart".into(),
+        session: info.id,
+        transcript_path: Some("/home/u/.claude/projects/-ws/abc.jsonl".into()),
+        session_id: Some("abc-native".into()),
+        ..Default::default()
+    };
+    let path = hook_drop::write_drop(
+        &hook_drop::drop_dir(state.path()),
+        &drop,
+        hook_drop::now_ms(),
+    )
+    .unwrap();
+    wait_until("the drop to be applied", || !path.exists()).await;
+    wait_until("the link to be stored", || row(info.id)[0].is_some()).await;
+
+    let after = row(info.id);
+    assert_eq!(
+        after[0].as_deref(),
+        Some("/home/u/.claude/projects/-ws/abc.jsonl")
+    );
+    assert_eq!(after[1].as_deref(), Some("abc-native"));
+    assert_eq!(
+        after[2..],
+        before[2..],
+        "no other column of the row changed"
     );
 }

@@ -1214,6 +1214,13 @@ impl Db {
         add_column_if_missing(&conn, "sessions", "acp", "acp TEXT")?;
         add_column_if_missing(&conn, "sessions", "profile_label", "profile_label TEXT")?;
         add_column_if_missing(&conn, "sessions", "approval_mode", "approval_mode TEXT")?;
+        add_column_if_missing(&conn, "sessions", "transcript_path", "transcript_path TEXT")?;
+        add_column_if_missing(
+            &conn,
+            "sessions",
+            "native_session_id",
+            "native_session_id TEXT",
+        )?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS tags (
                 id INTEGER PRIMARY KEY,
@@ -2030,6 +2037,31 @@ impl Db {
             anyhow::bail!("no session row with id {id} to record codename {codename:?}");
         }
         Ok(())
+    }
+
+    /// The CLI's own transcript path and session id: a pointer, never content.
+    pub fn update_session_transcript_link(
+        &self,
+        id: u32,
+        transcript_path: Option<&str>,
+        native_session_id: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("db lock");
+        conn.execute(
+            "UPDATE sessions SET transcript_path = COALESCE(?2, transcript_path),
+                native_session_id = COALESCE(?3, native_session_id) WHERE id = ?1",
+            rusqlite::params![id, transcript_path, native_session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_transcript_link(&self, id: u32) -> Result<(Option<String>, Option<String>)> {
+        let conn = self.conn.lock().expect("db lock");
+        Ok(conn.query_row(
+            "SELECT transcript_path, native_session_id FROM sessions WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
     }
 
     pub fn session_codename(&self, id: u32) -> Result<Option<String>> {

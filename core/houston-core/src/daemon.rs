@@ -919,6 +919,22 @@ impl DelegationSettleSample {
     }
 }
 
+type TranscriptLink = (Option<String>, Option<String>);
+
+/// What a drop adds to the stored link, or `None` when it adds nothing.
+fn transcript_link_update(
+    stored: Option<&TranscriptLink>,
+    path: Option<&str>,
+    native: Option<&str>,
+) -> Option<TranscriptLink> {
+    let (old_path, old_native) = stored.cloned().unwrap_or_default();
+    let next = (
+        path.map(str::to_string).or(old_path.clone()),
+        native.map(str::to_string).or(old_native.clone()),
+    );
+    (next != (old_path, old_native)).then_some(next)
+}
+
 /// A routine run in flight, keyed by routine id. The pane's session is the
 /// whole record: a run has no conversation, only its independent run row.
 #[derive(Debug, Clone, Copy)]
@@ -1030,6 +1046,9 @@ pub struct Daemon {
     permission_episodes: Mutex<HashMap<u32, orchestrate::PermissionEpisodes>>,
     antigravity_roots: Mutex<HashMap<u32, String>>,
     routine_runs: Mutex<HashMap<u32, RoutineRun>>,
+    /// Last transcript path and native id written per session, so a drop
+    /// repeating them costs no write.
+    transcript_links: Mutex<HashMap<u32, TranscriptLink>>,
     routine_settle: Mutex<HashMap<u32, DelegationSettleSample>>,
     routine_pane_cmd_override: Mutex<Option<Vec<String>>>,
     routine_pane_registration_hook_for_test: Mutex<Option<RoutinePaneRegistrationHook>>,
@@ -2251,6 +2270,7 @@ impl Daemon {
             antigravity_roots: Mutex::new(HashMap::new()),
             browser_relay: Arc::new(crate::browser_relay::BrowserRelayState::new()),
             routine_runs: Mutex::new(HashMap::new()),
+            transcript_links: Mutex::new(HashMap::new()),
             routine_settle: Mutex::new(HashMap::new()),
             routine_pane_cmd_override: Mutex::new(None),
             routine_pane_registration_hook_for_test: Mutex::new(None),
@@ -9151,6 +9171,7 @@ impl Daemon {
             .cloned();
         if let Some(session) = session {
             self.mark_detected(d.session, &session, provider);
+            self.note_transcript_link(d.session, d);
         }
         self.note_hook_last_message(
             d.session,
@@ -9181,6 +9202,26 @@ impl Daemon {
             self.handle_hook_from_with(d.session, provider, &d.event, d.cwd.as_deref(), ambiguous);
         self.note_context_from_hook(d.session, provider, d);
         verdict
+    }
+
+    fn note_transcript_link(&self, session: u32, d: &crate::hook_drop::HookDrop) {
+        let mut links = self.transcript_links.lock().expect("transcript links lock");
+        let Some(next) = transcript_link_update(
+            links.get(&session),
+            d.transcript_path.as_deref().filter(|p| !p.is_empty()),
+            d.session_id.as_deref().filter(|id| !id.is_empty()),
+        ) else {
+            return;
+        };
+        match self
+            .db
+            .update_session_transcript_link(session, next.0.as_deref(), next.1.as_deref())
+        {
+            Ok(()) => {
+                links.insert(session, next);
+            }
+            Err(e) => tracing::warn!("recording session {session}'s transcript link: {e:#}"),
+        }
     }
 
     fn correlate_hook_drop(
@@ -16483,5 +16524,27 @@ mod codex_trust_row_tests {
             claude_row.trust, None,
             "a provider without a trust seam carries no trust field"
         );
+    }
+}
+
+#[cfg(test)]
+mod transcript_link_tests {
+    use super::transcript_link_update;
+
+    #[test]
+    fn same_values_skip_the_write() {
+        let first = transcript_link_update(None, Some("/t/a.jsonl"), Some("abc"))
+            .expect("a first drop writes");
+        assert_eq!(first, (Some("/t/a.jsonl".into()), Some("abc".into())));
+        assert_eq!(
+            transcript_link_update(Some(&first), Some("/t/a.jsonl"), Some("abc")),
+            None
+        );
+        assert_eq!(transcript_link_update(Some(&first), None, None), None);
+        assert_eq!(
+            transcript_link_update(Some(&first), Some("/t/b.jsonl"), None),
+            Some((Some("/t/b.jsonl".into()), Some("abc".into())))
+        );
+        assert_eq!(transcript_link_update(None, None, None), None);
     }
 }
