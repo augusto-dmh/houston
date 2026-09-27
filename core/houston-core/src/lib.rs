@@ -22,6 +22,7 @@ pub mod fs_watch;
 pub mod gh;
 pub mod git;
 pub mod handoff;
+pub mod harness;
 pub mod home_dir;
 pub mod hook_drop;
 pub mod hook_state;
