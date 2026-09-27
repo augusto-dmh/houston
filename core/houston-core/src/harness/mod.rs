@@ -255,6 +255,7 @@ fn digest_cmd(
         "generated_at": window::format_ms(now),
         "providers": providers,
         "window": {
+            "requested": [window::format_ms(window.since_ms), window::format_ms(window.until_ms)],
             "mode": mode,
             "since": window::format_ms(window.since_ms),
             "until": window::format_ms(window.until_ms),

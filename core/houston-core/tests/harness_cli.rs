@@ -53,6 +53,15 @@ impl Fixture {
         for id in [MAIN, FORK, OLD, REVIEW] {
             place(&format!("{id}.jsonl"), &self.ws);
         }
+        // A finished transcript's mtime is its last record's instant.
+        let old = projects.join(slug(&self.ws)).join(format!("{OLD}.jsonl"));
+        let august = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_785_571_800);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(august)
+            .unwrap();
         place(
             &format!("{SIBLING}.jsonl"),
             Path::new(&format!("{ws}-other")),
@@ -385,8 +394,39 @@ fn digest_rejects_unknown_provider_listing_accepted() {
 #[test]
 fn digest_keeps_only_sessions_whose_cwd_is_in_the_workspace() {
     let f = Fixture::new().with_transcripts();
+    let codex = f.home.join(".codex/sessions/2026/09/12");
+    let template = std::fs::read_to_string(
+        fixtures()
+            .join("codex")
+            .join("rollout-2026-09-12T14-00-00-019d0000-0000-7000-8000-00000000c0de.jsonl"),
+    )
+    .unwrap();
+    let ws = f.ws.to_string_lossy().into_owned();
+    for (id, cwd) in [
+        (
+            "019d0000-0000-7000-8000-0000000000a1",
+            format!("{ws}/.claude/worktrees/y"),
+        ),
+        (
+            "019d0000-0000-7000-8000-0000000000a2",
+            format!("{ws}-other"),
+        ),
+    ] {
+        let body = template
+            .replace("019d0000-0000-7000-8000-00000000c0de", id)
+            .replace("__WS__", &cwd);
+        std::fs::write(codex.join(format!("rollout-{id}.jsonl")), body).unwrap();
+    }
     let (lines, _) = f.digest();
     let ids: Vec<&str> = lines.iter().map(|l| l["id"].as_str().unwrap()).collect();
+    assert!(
+        ids.contains(&"019d0000-0000-7000-8000-0000000000a1"),
+        "codex in a worktree is in"
+    );
+    assert!(
+        !ids.contains(&"019d0000-0000-7000-8000-0000000000a2"),
+        "codex in the sibling is out"
+    );
     assert!(ids.contains(&MAIN));
     assert!(
         ids.contains(&WORKTREE),
@@ -501,6 +541,10 @@ fn digest_meta_reports_window_and_counts() {
     let f = Fixture::new().with_transcripts();
     let (lines, meta) = f.digest();
     assert_eq!(meta["v"], 1);
+    assert_eq!(
+        meta["window"]["requested"],
+        serde_json::json!(["2026-09-10T00:00:00Z", "2026-09-18T00:00:00Z"])
+    );
     assert_eq!(meta["window"]["mode"], "explicit");
     assert_eq!(meta["window"]["since"], "2026-09-10T00:00:00Z");
     assert_eq!(meta["window"]["until"], "2026-09-18T00:00:00Z");
@@ -552,4 +596,57 @@ fn preset_prints_the_routine_fields() {
         .as_str()
         .unwrap()
         .starts_with("[houston harness review]"));
+}
+
+#[test]
+fn digest_rejects_a_bad_window_through_the_binary() {
+    let f = Fixture::new();
+    let (code, _, err) = f.run(
+        &["digest", "--since", "2026-09-17", "--until", "2026-09-10"],
+        Some("7"),
+    );
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("2026-09-17") && err.contains("2026-09-10"),
+        "{err}"
+    );
+    let (code, _, err) = f.run(
+        &["digest", "--since", "2026-08-01", "--until", "2026-08-31"],
+        Some("7"),
+    );
+    assert_eq!(code, 2);
+    assert!(err.contains("31 days") && err.contains("30"), "{err}");
+}
+
+#[test]
+fn digest_refuses_over_the_total_cap_through_the_binary() {
+    let f = Fixture::new();
+    let ws = f.ws.to_string_lossy().into_owned();
+    let dir = f.home.join(".claude/projects").join(slug(&f.ws));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ask = "a long ask about the export button ".repeat(55);
+    // 40 sessions of 30 prompts near the per-prompt cap: each line stays under
+    // 64 KiB, and together they pass 2 MiB.
+    for n in 0..40 {
+        let lines: Vec<String> = (0..30)
+            .map(|i| {
+                serde_json::json!({
+                    "type": "user", "uuid": format!("u-{n}-{i}"), "sessionId": format!("s{n}"),
+                    "timestamp": format!("2026-09-12T10:{i:02}:00.000Z"), "cwd": ws,
+                    "message": {"role": "user", "content": format!("{i} {ask}")},
+                })
+                .to_string()
+            })
+            .collect();
+        std::fs::write(dir.join(format!("s{n:02}.jsonl")), lines.join("\n") + "\n").unwrap();
+    }
+    let (code, _, err) = f.run(
+        &["digest", "--since", "2026-09-10", "--until", "2026-09-17"],
+        Some("7"),
+    );
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("the digest is "), "{err}");
+    assert!(err.contains("2097152 byte cap"), "{err}");
+    assert!(err.contains("40 sessions"), "{err}");
+    assert!(!f.run_dir("r7").join("digest.jsonl").exists());
 }

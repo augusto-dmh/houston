@@ -612,6 +612,8 @@ fn codex_files(req: &Request, tally: &mut Tally) -> Vec<PathBuf> {
             note_available(tally, first);
             if file.mtime_ms >= req.window.since_ms {
                 out.push(file.path);
+            } else {
+                tally.out_of_window += 1;
             }
         }
     }
@@ -788,6 +790,7 @@ pub fn run(req: &Request) -> Result<Outcome> {
     let mut sessions: Vec<Session> = Vec::new();
     for path in claude_files(req, &mut tally) {
         if mtime_ms(&path) < req.window.since_ms {
+            tally.out_of_window += 1;
             continue;
         }
         let mut s = Session {
@@ -1028,6 +1031,16 @@ mod tests {
             .err()
             .expect("three sessions exceed a 1000 byte cap")
             .to_string();
+        let expected = run(&request(Path::new("/ws"), root.path(), usize::MAX))
+            .unwrap()
+            .lines
+            .iter()
+            .map(|l| l.len() + 1)
+            .sum::<usize>();
+        assert!(
+            err.contains(&format!("the digest is {expected} bytes")),
+            "{err}"
+        );
         assert!(err.contains("1000 byte cap"), "{err}");
         assert!(err.contains("3 sessions"), "{err}");
         assert!(!target.exists());
