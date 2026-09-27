@@ -22,6 +22,10 @@ pub const DIGEST_TOTAL_MAX: usize = 2 * 1024 * 1024;
 /// Same bound as the usage scan: a longer line is tool output or an image.
 const LINE_MAX: usize = 8 * 1024 * 1024;
 const PROMPT_MAX_CHARS: usize = 2_000;
+/// A pasted `/context` report carries its per-source token table past 2 000
+/// characters; that table is the evidence for context spent on tool schemas.
+const CONTEXT_PASTE_MAX_CHARS: usize = 8_000;
+const CONTEXT_PASTE_PREFIX: &str = "## Context Usage";
 const LAST_TEXT_MAX_CHARS: usize = 2_000;
 const REASON_MAX_CHARS: usize = 200;
 const ERROR_SAMPLE_CHARS: usize = 200;
@@ -790,7 +794,12 @@ fn session_value(s: &Session, prompts: &[Prompt], dropped: usize) -> Value {
         "models": s.models,
         "prompt_count": s.prompts.len(),
         "prompts": prompts.iter().map(|p| {
-            let mut v = json!({ "at": p.at, "text": cap_chars(&p.text, PROMPT_MAX_CHARS) });
+            let max = if p.text.trim_start().starts_with(CONTEXT_PASTE_PREFIX) {
+                CONTEXT_PASTE_MAX_CHARS
+            } else {
+                PROMPT_MAX_CHARS
+            };
+            let mut v = json!({ "at": p.at, "text": cap_chars(&p.text, max) });
             if p.queued {
                 v["queued"] = json!(true);
             }
@@ -838,7 +847,7 @@ fn session_line(
         let mut freed = 0;
         while freed < excess && kept.len() > 2 {
             let mid = kept.len() / 2;
-            freed += kept.remove(mid).text.len().min(PROMPT_MAX_CHARS * 4) + 16;
+            freed += kept.remove(mid).text.len().min(CONTEXT_PASTE_MAX_CHARS * 4) + 16;
             dropped += 1;
         }
     }
@@ -1073,6 +1082,36 @@ mod tests {
         assert_eq!(
             tool_input_summary(&json!({ "file_path": "/a/b.md" })),
             "/a/b.md"
+        );
+    }
+
+    #[test]
+    fn a_pasted_context_report_keeps_its_token_table() {
+        let s = Session {
+            provider: "claude",
+            id: "s".into(),
+            ..Default::default()
+        };
+        let table = format!(
+            "## Context Usage\n\n{}| MCP tools (deferred) | 216k |",
+            "x".repeat(4_000)
+        );
+        let ordinary = "y".repeat(4_000);
+        let v = session_value(&s, &[prompt(&table), prompt(&ordinary)], 0);
+        let texts: Vec<&str> = v["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["text"].as_str().unwrap())
+            .collect();
+        assert!(
+            texts[0].ends_with("| MCP tools (deferred) | 216k |"),
+            "kept whole"
+        );
+        assert_eq!(
+            texts[1].chars().count(),
+            PROMPT_MAX_CHARS + 1,
+            "capped with an ellipsis"
         );
     }
 
