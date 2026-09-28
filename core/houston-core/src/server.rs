@@ -3538,6 +3538,8 @@ struct SpawnBody {
     #[serde(default)]
     reusable: bool,
     #[serde(default)]
+    handoff: bool,
+    #[serde(default)]
     effort: Option<proto::ChatEffort>,
     #[serde(default)]
     output_format: Option<String>,
@@ -3555,24 +3557,46 @@ async fn orch_spawn(
         Err(r) => return *r,
     };
     let reusable = body.reusable;
+    let handoff = body.handoff;
+    if handoff && reusable {
+        return orch_err_response(anyhow::anyhow!(
+            crate::orchestrate::HANDOFF_REUSABLE_REFUSED
+        ));
+    }
     let result = tokio::task::spawn_blocking(move || {
-        daemon.orchestrate_spawn_with_options(
-            scope.session_id,
-            body.kind,
-            body.model,
-            body.cwd,
-            crate::orchestrate::Brief {
-                prompt: body.prompt,
-                output_format: body.output_format,
-                boundaries: body.boundaries,
-            },
-            body.auto_approve,
-            body.profile,
-            body.role,
-            body.target_workspace,
-            body.reusable,
-            body.effort,
-        )
+        let brief = crate::orchestrate::Brief {
+            prompt: body.prompt,
+            output_format: body.output_format,
+            boundaries: body.boundaries,
+        };
+        if handoff {
+            daemon.orchestrate_handoff(
+                scope.session_id,
+                body.kind,
+                body.model,
+                body.cwd,
+                brief,
+                body.auto_approve,
+                body.profile,
+                body.role,
+                body.target_workspace,
+                body.effort,
+            )
+        } else {
+            daemon.orchestrate_spawn_with_options(
+                scope.session_id,
+                body.kind,
+                body.model,
+                body.cwd,
+                brief,
+                body.auto_approve,
+                body.profile,
+                body.role,
+                body.target_workspace,
+                body.reusable,
+                body.effort,
+            )
+        }
     })
     .await
     .unwrap_or_else(|e| Err(anyhow::anyhow!("orchestrate spawn panicked: {e}")));
@@ -3585,7 +3609,12 @@ async fn orch_spawn(
                 "codename": info.codename,
                 "workspace": info.project_dir,
                 "reusable": reusable,
-                "next_action": crate::orchestrate::SPAWN_NEXT_ACTION,
+                "handoff": handoff,
+                "next_action": if handoff {
+                    crate::orchestrate::HANDOFF_NEXT_ACTION
+                } else {
+                    crate::orchestrate::SPAWN_NEXT_ACTION
+                },
             })),
         )
             .into_response(),
