@@ -36,7 +36,7 @@ export function HarnessView({
     selectedWorkspace === 'all' ? null : selectedWorkspace
   )
   const [error, setError] = useState<string | null>(null)
-  const { state, report, loadReport } = useHarness(client, workspace)
+  const { state, report, reportError, loadReport } = useHarness(client, workspace)
   const routineId = state?.routine?.id ?? null
 
   useEffect(() => {
@@ -65,6 +65,7 @@ export function HarnessView({
       }}
       state={state}
       report={report}
+      reportError={reportError}
       running={routineId !== null && routinesRunning.includes(routineId)}
       liveSessions={liveSessions}
       onCreateRoutine={(v) => {

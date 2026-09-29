@@ -1426,6 +1426,7 @@ impl Db {
         migrate_routines_to_first_class(&conn)?;
         migrate_routines_to_standalone(&conn)?;
         close_stale_routine_runs(&conn)?;
+        harness::close_stale_reviews(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS command_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

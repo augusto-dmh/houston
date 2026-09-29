@@ -181,12 +181,7 @@ impl Daemon {
         key: &str,
         state: proto::HarnessFindingState,
     ) -> Result<()> {
-        if !self
-            .db
-            .harness_findings(workspace)?
-            .iter()
-            .any(|f| f.finding.key == key)
-        {
+        if !self.db.harness_finding_exists(workspace, key)? {
             bail!("no finding with key {key:?} in the harness reviews of {workspace}");
         }
         self.db

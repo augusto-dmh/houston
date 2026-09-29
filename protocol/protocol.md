@@ -380,7 +380,7 @@ failure not given a typed refusal comes back as `error`.
 | `routine_runs` | `runs: RoutineRun[]` | direct reply to `routine_runs` |
 | `routine_run_event` | `run: RoutineRun` | bcast — one run changed state: opened, refused before it spawned, or ended with an outcome |
 | `harness_state` | `workspace`, `routine?: Routine`, `reviews: HarnessReview[]` (newest first, at most `HARNESS_REVIEWS_PAGE`), `findings: HarnessFinding[]` (one per key, from the newest review that raised it), `models: HarnessModelOption[]` (native Anthropic chat and OpenAI chat/Responses models in the local model catalog; not account availability) | direct reply to `harness_state` |
-| `harness_report` | `review_id`, `markdown`, `truncated` (the file passed `HARNESS_REPORT_MAX_BYTES`) | direct reply to `harness_report` |
+| `harness_report` | `review_id`, `markdown`, `truncated` (the file passed `HARNESS_REPORT_MAX_BYTES`) | direct reply to `harness_report`; a read failure replies with `error.context = "harness_report:<review_id>"` so the client can offer a retry for that report |
 | `harness_changed` | `workspace` | bcast — a review of that workspace started, published or failed, or a decision changed; a client showing it asks for `harness_state` again |
 | `voice_settings` | `settings: VoiceSettings`, `cloud_key_present`, `keyring_error?`, `models: VoiceModelState[]` | direct reply to `voice_settings_get`; bcast after any settings or key change |
 | `voice_devices` | `devices: VoiceDevice[]` | direct reply to `voice_devices_get` |

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { HarnessReview } from '../../houston/generated/HarnessReview'
-import type { HarnessReport } from '../../houston/useHarness'
+import type { HarnessReport, HarnessReportError } from '../../houston/useHarness'
 import { MarkdownPreview } from '../MarkdownPreview'
 import { Select } from '../Select'
 import { NavDetailState, NavFeedback, SECONDARY_BUTTON } from './navChrome'
@@ -9,12 +9,14 @@ import { formatDay, formatWindow } from './harnessFormat'
 export function HarnessReportView({
   reviews,
   report,
+  reportError,
   onLoadReport,
   onOpenFile,
   onReveal
 }: {
   reviews: HarnessReview[]
   report: HarnessReport | null
+  reportError: HarnessReportError | null
   onLoadReport: (reviewId: number) => void
   onOpenFile: (path: string) => void
   onReveal: (path: string) => void
@@ -71,6 +73,21 @@ export function HarnessReportView({
         >
           <MarkdownPreview source={shown.markdown} variant="chat" />
         </div>
+      ) : reportError?.reviewId === current.id ? (
+        <NavDetailState
+          title="Could not load the report"
+          detail={reportError.message}
+          tone="error"
+          action={
+            <button
+              type="button"
+              className={SECONDARY_BUTTON}
+              onClick={() => onLoadReport(current.id)}
+            >
+              Retry
+            </button>
+          }
+        />
       ) : (
         <NavDetailState title="Loading the report" detail={`Reading ${dir}/report.md`} />
       )}

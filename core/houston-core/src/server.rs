@@ -1014,8 +1014,16 @@ async fn dispatch(
             }
         },
         proto::ClientMsg::HarnessReport { review_id } => {
-            let msg = daemon.harness_report(review_id)?;
-            let _ = send_msg(sink, &msg).await;
+            match daemon.harness_report(review_id) {
+                Ok(msg) => {
+                    let _ = send_msg(sink, &msg).await;
+                }
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    tracing::warn!("control request failed: {message}");
+                    send_error(sink, message, Some(format!("harness_report:{review_id}"))).await;
+                }
+            }
             Ok(())
         }
         proto::ClientMsg::HarnessDecide {

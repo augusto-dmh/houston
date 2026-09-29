@@ -138,6 +138,103 @@ fn harness_state_returns_native_models_from_the_cached_catalog() {
     );
 }
 
+#[tokio::test]
+async fn a_harness_review_routine_cannot_move_to_another_workspace() {
+    let (_addr, state_dir, daemon) = start_daemon_with_handle().await;
+    let ws = workspace(state_dir.path());
+    let other = workspace(&state_dir.path().join("other"));
+    let routine = review_routine(&daemon, &ws);
+
+    let error = daemon
+        .routine_update_full(
+            routine.id,
+            &routine.revision,
+            houston_core::daemon::RoutinePatch {
+                workspace_id: Some(Some(other.display().to_string())),
+                ..Default::default()
+            },
+        )
+        .expect_err("a Harness routine is bound to its workspace");
+    assert!(
+        error.to_string().contains(&ws.display().to_string()),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains(&other.display().to_string()),
+        "{error}"
+    );
+
+    let unchanged = daemon
+        .routine_update_full(
+            routine.id,
+            &routine.revision,
+            houston_core::daemon::RoutinePatch {
+                workspace_id: Some(Some(ws.display().to_string())),
+                ..Default::default()
+            },
+        )
+        .expect("the current workspace is allowed");
+    assert!(matches!(unchanged, proto::ServerMsg::Routines { .. }));
+}
+
+#[test]
+fn reopening_the_daemon_fails_interrupted_harness_reviews_and_keeps_published_ones() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let workspace = state_dir.path().join("project");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let db_path = state_dir.path().join("test.db");
+    let db = houston_core::db::Db::open(&db_path).unwrap();
+    let stale_id = db
+        .create_harness_review(
+            &workspace.display().to_string(),
+            1,
+            101,
+            "/tmp/harness/r101",
+            1,
+        )
+        .unwrap();
+    let published_id = db
+        .create_harness_review(
+            &workspace.display().to_string(),
+            1,
+            102,
+            "/tmp/harness/r102",
+            2,
+        )
+        .unwrap();
+    db.publish_harness_review(
+        published_id,
+        &houston_core::db::HarnessPublication {
+            window: None,
+            sessions: None,
+            prompts: None,
+            cost_usd: None,
+            summary: "published before restart",
+            findings: &[],
+        },
+        3,
+    )
+    .unwrap();
+    drop(db);
+
+    let daemon = Daemon::new(houston_core::daemon::DaemonConfig {
+        token: "test-token".into(),
+        db_path,
+    })
+    .unwrap();
+    let (_, reviews, _) = state(&daemon, &workspace);
+    let stale = reviews.iter().find(|review| review.id == stale_id).unwrap();
+    assert_eq!(stale.status, proto::HarnessReviewStatus::Failed);
+    assert!(stale.ended_at_ms.is_some());
+    assert!(stale.error.as_deref().unwrap().contains("daemon stopped"));
+    let published = reviews
+        .iter()
+        .find(|review| review.id == published_id)
+        .unwrap();
+    assert_eq!(published.status, proto::HarnessReviewStatus::Published);
+    assert!(published.error.is_none());
+}
+
 fn plain_pane(daemon: &Arc<Daemon>, ws: &Path) -> u32 {
     daemon
         .create_session(CreateParams {
@@ -545,6 +642,19 @@ async fn decisions_outlive_their_review_and_a_recurrence_reopens_them() {
 
     write_result(&review, &["stale-rule"]);
     publish(addr, &token(&daemon, second, &ws), "1 finding").await;
+    let findings = state(&daemon, &ws).2;
+    assert_eq!(
+        findings.len(),
+        2,
+        "only the newest row for each key is returned"
+    );
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding.key == "stale-rule")
+            .count(),
+        1
+    );
     let stale = find("stale-rule");
     assert_eq!(stale.state, proto::HarnessFindingState::Open);
     assert!(stale.recurred, "raised again after it was resolved");

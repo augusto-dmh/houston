@@ -48,6 +48,8 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
             apply_prompt TEXT NOT NULL,
             PRIMARY KEY (review_id, key)
         );
+        CREATE INDEX IF NOT EXISTS idx_harness_findings_key_review
+            ON harness_findings(key, review_id);
         CREATE TABLE IF NOT EXISTS harness_decisions (
             workspace TEXT NOT NULL,
             key TEXT NOT NULL,
@@ -56,6 +58,20 @@ pub(super) fn migrate(conn: &Connection) -> Result<()> {
             PRIMARY KEY (workspace, key)
         );",
     )?;
+    Ok(())
+}
+
+pub(super) fn close_stale_reviews(conn: &Connection) -> Result<()> {
+    let closed = conn.execute(
+        "UPDATE harness_reviews SET status = 'failed', \
+             error = 'the daemon stopped while this review was in flight', \
+             ended_at_ms = MAX(started_at_ms, unixepoch() * 1000) \
+         WHERE status = 'running'",
+        [],
+    )?;
+    if closed > 0 {
+        tracing::info!("closed {closed} harness review(s) a previous daemon left in flight");
+    }
     Ok(())
 }
 
@@ -185,6 +201,23 @@ impl Db {
                 |r| r.get(0),
             )
             .optional()?)
+    }
+
+    pub fn harness_finding_exists(&self, workspace: &str, key: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("db lock");
+        Ok(conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM harness_findings f
+                 JOIN harness_reviews r ON r.id = f.review_id
+                 WHERE r.workspace = ?1 AND r.status = ?2 AND f.key = ?3
+             )",
+            rusqlite::params![
+                workspace,
+                wire_name(&proto::HarnessReviewStatus::Published)?,
+                key
+            ],
+            |r| r.get(0),
+        )?)
     }
 
     /// Replaces a mapping whose routine was deleted.
@@ -342,7 +375,7 @@ impl Db {
         Ok(changed > 0)
     }
 
-    /// Every published finding of the workspace, newest review first.
+    /// The newest published finding for each key, ordered by review.
     pub fn harness_findings(&self, workspace: &str) -> Result<Vec<HarnessFindingRow>> {
         let conn = self.conn.lock().expect("db lock");
         let mut stmt = conn.prepare(
@@ -350,7 +383,15 @@ impl Db {
              f.sessions, f.count, f.quotes, f.recommendation_kind, f.target, \
              f.recommendation, f.apply_prompt \
              FROM harness_findings f JOIN harness_reviews r ON r.id = f.review_id \
-             WHERE r.workspace = ?1 AND r.status = ?2 ORDER BY f.review_id DESC, f.rowid",
+             WHERE r.workspace = ?1 AND r.status = ?2 \
+               AND NOT EXISTS (
+                   SELECT 1 FROM harness_findings newer \
+                   JOIN harness_reviews newer_review ON newer_review.id = newer.review_id \
+                   WHERE newer_review.workspace = r.workspace \
+                     AND newer_review.status = ?2 AND newer.key = f.key \
+                     AND newer_review.id > r.id
+               ) \
+             ORDER BY f.review_id DESC, f.rowid",
         )?;
         let rows = stmt
             .query_map(

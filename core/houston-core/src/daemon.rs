@@ -4619,6 +4619,13 @@ impl Daemon {
             Some(next) => next,
             None => row.workspace_id,
         };
+        if let Some(bound_workspace) = self.db.harness_workspace_of_routine(id)? {
+            if workspace_id.as_deref() != Some(bound_workspace.as_str()) {
+                anyhow::bail!(
+                    "Harness review routine {id} is bound to workspace {bound_workspace:?} and cannot be moved to {workspace_id:?}"
+                );
+            }
+        }
         let engine = engine.unwrap_or(row.engine);
         let model = match model {
             Some(next) => next,

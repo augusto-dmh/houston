@@ -47,6 +47,7 @@ describe('Harness report and history layout', () => {
         <HarnessReportView
           reviews={[REVIEW]}
           report={report}
+          reportError={null}
           onLoadReport={vi.fn()}
           onOpenFile={vi.fn()}
           onReveal={vi.fn()}
@@ -79,5 +80,29 @@ describe('Harness report and history layout', () => {
     expect(headers[windowIndex].getAttribute('style')).toContain('260px')
     expect(table?.className).toContain('min-w-[1000px]')
     expect(table?.parentElement?.className).toContain('overflow-x-auto')
+  })
+
+  it('shows a correlated report error with a retry action', () => {
+    const onLoadReport = vi.fn()
+    act(() =>
+      root.render(
+        <HarnessReportView
+          reviews={[REVIEW]}
+          report={null}
+          reportError={{
+            workspace: REVIEW.workspace,
+            reviewId: REVIEW.id,
+            message: 'report.md is missing'
+          }}
+          onLoadReport={onLoadReport}
+          onOpenFile={vi.fn()}
+          onReveal={vi.fn()}
+        />
+      )
+    )
+
+    expect(container.textContent).toContain('report.md is missing')
+    act(() => Array.from(container.querySelectorAll('button')).find((button) => button.textContent === 'Retry')!.click())
+    expect(onLoadReport).toHaveBeenCalledWith(REVIEW.id)
   })
 })

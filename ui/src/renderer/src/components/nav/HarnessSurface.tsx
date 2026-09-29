@@ -5,7 +5,7 @@ import type { HarnessFindingState } from '../../houston/generated/HarnessFinding
 import type { HarnessModelOption } from '../../houston/generated/HarnessModelOption'
 import type { Routine } from '../../houston/generated/Routine'
 import type { RoutineMutation } from '../../houston/routineTypes'
-import type { HarnessReport, HarnessState } from '../../houston/useHarness'
+import type { HarnessReport, HarnessReportError, HarnessState } from '../../houston/useHarness'
 import { MATERIAL_CLS, materialAttrs } from '../material'
 import { Segmented } from '../Segmented'
 import { Select } from '../Select'
@@ -52,6 +52,7 @@ export interface HarnessSurfaceProps {
   onWorkspace: (id: string) => void
   state: HarnessState | null
   report: HarnessReport | null
+  reportError?: HarnessReportError | null
   running: boolean
   liveSessions: { has(id: number): boolean }
   error?: string | null
@@ -437,6 +438,7 @@ function HarnessBody(
         <HarnessReportView
           reviews={state.reviews}
           report={report}
+          reportError={props.reportError ?? null}
           onLoadReport={props.onLoadReport}
           onOpenFile={props.onOpenFile}
           onReveal={props.onReveal}
