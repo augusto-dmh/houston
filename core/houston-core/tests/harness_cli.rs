@@ -191,7 +191,7 @@ fn bare_invocation_prints_usage_and_exits_two() {
     let f = Fixture::new();
     let (code, _, err) = f.run(&[], None);
     assert_eq!(code, 2);
-    for word in ["inventory", "digest", "preset"] {
+    for word in ["inventory", "digest", "publish"] {
         assert!(err.contains(word), "{err}");
     }
 }
@@ -599,27 +599,14 @@ fn digest_codex_session_fields_match_fixture() {
 }
 
 #[test]
-fn preset_prints_the_routine_fields() {
+fn publish_outside_a_houston_pane_is_refused_by_name() {
     let f = Fixture::new();
-    let (code, out, err) = f.run(&["preset", "--workspace", f.ws.to_str().unwrap()], None);
-    assert_eq!(code, 0, "{err}");
-    let v: Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["name"], "Harness review · app");
-    assert_eq!(v["enabled"], false);
-    assert_eq!(
-        v["cadence"],
-        serde_json::json!({"type": "clock", "hour": 9, "minute": 0, "weekdays": [1]})
+    let (code, out, err) = f.run(&["publish", "--summary", "1 finding"], Some("1"));
+    assert_eq!(code, 2, "{out}");
+    assert!(
+        err.contains("HOUSTON_MCP_URL is not set; hs-harness publish runs only inside"),
+        "{err}"
     );
-    assert_eq!(v["engine"], "claude");
-    assert_eq!(v["model"], Value::Null);
-    assert_eq!(v["effort"], Value::Null);
-    assert_eq!(v["permission_mode"], "accept_edits");
-    assert_eq!(v["isolate"], false);
-    assert_eq!(v["workspace_id"], f.ws.to_str().unwrap());
-    assert!(v["prompt"]
-        .as_str()
-        .unwrap()
-        .starts_with("[houston harness review]"));
 }
 
 #[test]

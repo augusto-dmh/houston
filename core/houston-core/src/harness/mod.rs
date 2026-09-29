@@ -292,10 +292,12 @@ fn digest_cmd(
 
 /// The CLI door to the daemon's `harness_publish`, for a CLI without MCP.
 fn publish_cmd(summary: Option<&str>) -> Result<()> {
-    let base = crate::orchestrate::cli_base_url(std::env::var("HOUSTON_MCP_URL").ok().as_deref())?;
-    let token = std::env::var("HOUSTON_MCP_TOKEN").map_err(|_| {
-        anyhow!("HOUSTON_MCP_TOKEN is not set; publish runs only inside a Houston pane")
-    })?;
+    let outside = |var: &str| {
+        anyhow!("{var} is not set; hs-harness publish runs only inside a Harness review run's pane")
+    };
+    let url = std::env::var("HOUSTON_MCP_URL").map_err(|_| outside("HOUSTON_MCP_URL"))?;
+    let token = std::env::var("HOUSTON_MCP_TOKEN").map_err(|_| outside("HOUSTON_MCP_TOKEN"))?;
+    let base = crate::orchestrate::cli_base_url(Some(&url))?;
     let v = crate::orchestrate::cli_call(
         &base,
         &token,
