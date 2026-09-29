@@ -938,6 +938,12 @@ async fn a_husk_left_by_a_crash_resumes_on_restart() {
     );
 }
 
+async fn send(ws: &mut WsStream, msg: &proto::ClientMsg) {
+    ws.send(Message::Text(serde_json::to_string(msg).unwrap().into()))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn restore_resume_defaults_on_and_persists() {
     let env = setup().await;
@@ -946,11 +952,56 @@ async fn restore_resume_defaults_on_and_persists() {
         other => panic!("host_info answers HostInfo, not {other:?}"),
     };
     let daemon = boot(&env);
+    let addr = serve(&daemon).await;
     assert!(host(&daemon), "on by default");
-    daemon.set_restore_resume(false).unwrap();
+
+    let mut ws = connect_and_hello(addr, TOKEN).await;
+    send(
+        &mut ws,
+        &proto::ClientMsg::RestoreResumeSet { enabled: false },
+    )
+    .await;
+    let broadcast = loop {
+        if let proto::ServerMsg::HostInfo { restore_resume, .. } = next_control(&mut ws).await {
+            break restore_resume;
+        }
+    };
+    assert!(
+        !broadcast,
+        "restore_resume_set answers with host_info carrying the new value"
+    );
     assert!(!host(&daemon));
-    drop(daemon);
     assert!(!host(&boot(&env)), "the choice survives a restart");
+}
+
+#[tokio::test]
+async fn a_live_pane_broadcasts_when_it_gains_and_loses_its_handle() {
+    let env = setup().await;
+    let daemon = boot(&env);
+    let addr = serve(&daemon).await;
+    let mut ws = connect_and_hello(addr, TOKEN).await;
+    let ws_dir = project(&env, "ws");
+    let (pane, _, _) = pane_with_a_turn(&env, &daemon, &ws_dir, None).await;
+    let resumable_of = |msg: proto::ServerMsg| match msg {
+        proto::ServerMsg::SessionResumable { session, resumable } if session == pane.id => {
+            Some(resumable)
+        }
+        _ => None,
+    };
+    let gained = loop {
+        if let Some(r) = resumable_of(next_control(&mut ws).await) {
+            break r;
+        }
+    };
+    assert!(gained, "the first turn broadcasts resumable: true");
+
+    daemon.kill(pane.id).unwrap();
+    let lost = loop {
+        if let Some(r) = resumable_of(next_control(&mut ws).await) {
+            break r;
+        }
+    };
+    assert!(!lost, "a kill broadcasts resumable: false");
 }
 
 #[tokio::test]
