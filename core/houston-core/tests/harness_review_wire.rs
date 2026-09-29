@@ -818,3 +818,98 @@ async fn hook_drop_links_session_to_its_transcript() {
         "no other column of the row changed"
     );
 }
+
+#[tokio::test]
+async fn a_sub_agent_drop_never_replaces_the_root_conversation_link() {
+    let (_addr, state, daemon) = start_daemon_with_handle().await;
+    let ws = workspace(state.path());
+    let db_path = state.path().join("test.db");
+    let link = |id: u32| -> (Option<String>, Option<String>) {
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT transcript_path, native_session_id FROM sessions WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
+    let apply = |session: u32, agent: &str, event: &str, id: &str, path: Option<&str>| {
+        let drop = HookDrop {
+            v: hook_drop::DROP_V,
+            agent: Some(agent.into()),
+            event: event.into(),
+            session,
+            session_id: Some(id.into()),
+            transcript_path: path.map(str::to_string),
+            ..Default::default()
+        };
+        hook_drop::write_drop(
+            &hook_drop::drop_dir(state.path()),
+            &drop,
+            hook_drop::now_ms(),
+        )
+        .unwrap()
+    };
+    let pane = |daemon: &Arc<Daemon>| {
+        daemon
+            .create_session(CreateParams {
+                agent: proto::AgentKind::Custom,
+                project_dir: ws.clone(),
+                cmd: Some(sleeper()),
+                cols: 80,
+                rows: 24,
+                cwd_from: None,
+                shell_integration: false,
+                auto_approve: false,
+                acp: None,
+                profile: None,
+                prompt: None,
+            })
+            .unwrap()
+            .id
+    };
+
+    // OpenCode: a child session's permission prompt and its SubagentStop carry
+    // the child's id (fixtures opencode-1.18.27-04 and -05).
+    let opencode = pane(&daemon);
+    let p = apply(opencode, "opencode", "session.created", "ses_root01", None);
+    wait_until("the root drop", || !p.exists()).await;
+    assert_eq!(link(opencode).1.as_deref(), Some("ses_root01"));
+    for event in ["permission.asked", "SubagentStop"] {
+        let p = apply(opencode, "opencode", event, "ses_child01", None);
+        wait_until("the child drop", || !p.exists()).await;
+        assert_eq!(
+            link(opencode).1.as_deref(),
+            Some("ses_root01"),
+            "OpenCode {event} for a child session replaced the root id"
+        );
+    }
+
+    // Antigravity: a sub-agent's drops carry its own conversationId and
+    // transcript (fixtures antigravity-1.1.26-07 and -08).
+    let agy = pane(&daemon);
+    let p = apply(
+        agy,
+        "antigravity",
+        "SessionStart",
+        "conv-root-1",
+        Some("/t/root.jsonl"),
+    );
+    wait_until("the root drop", || !p.exists()).await;
+    for event in ["SessionStart", "Stop"] {
+        let p = apply(
+            agy,
+            "antigravity",
+            event,
+            "conv-sub-1",
+            Some("/t/sub.jsonl"),
+        );
+        wait_until("the sub-agent drop", || !p.exists()).await;
+        assert_eq!(
+            link(agy),
+            (Some("/t/root.jsonl".into()), Some("conv-root-1".into())),
+            "Antigravity sub-agent {event} replaced the root link"
+        );
+    }
+}

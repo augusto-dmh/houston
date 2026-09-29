@@ -154,6 +154,19 @@ pub fn events_for(provider: proto::AgentKind) -> &'static [(&'static str, AgentE
     }
 }
 
+// Sub-agent lifecycle events, and OpenCode prompts raised inside a child
+// session, can carry the child's conversation id instead of the pane's own.
+pub fn names_root_conversation(provider: proto::AgentKind, event: &str) -> bool {
+    if matches!(
+        event,
+        "SubagentStart" | "SubagentStop" | "subagentStart" | "subagentStop"
+    ) {
+        return false;
+    }
+    !(provider == proto::AgentKind::Opencode
+        && (event.starts_with("permission.") || event.starts_with("question.")))
+}
+
 pub fn has_event_mapping(provider: proto::AgentKind) -> bool {
     !events_for(provider).is_empty()
 }
@@ -478,6 +491,31 @@ mod tests {
                 None,
                 "{kind:?} must not read SubagentStop — it fires mid-turn"
             );
+        }
+    }
+
+    #[test]
+    fn only_root_session_events_name_the_pane_conversation() {
+        use proto::AgentKind as K;
+        for (kind, event) in [
+            (K::Claude, "SubagentStop"),
+            (K::Codex, "SubagentStart"),
+            (K::Cursor, "subagentStop"),
+            (K::Grok, "SubagentStop"),
+            (K::Opencode, "SubagentStop"),
+            (K::Opencode, "permission.asked"),
+            (K::Opencode, "question.v2.asked"),
+        ] {
+            assert!(!names_root_conversation(kind, event), "{kind:?} {event}");
+        }
+        for (kind, event) in [
+            (K::Claude, "SessionStart"),
+            (K::Claude, "PermissionRequest"),
+            (K::Opencode, "session.created"),
+            (K::Opencode, "message.updated"),
+            (K::Antigravity, "SessionStart"),
+        ] {
+            assert!(names_root_conversation(kind, event), "{kind:?} {event}");
         }
     }
 

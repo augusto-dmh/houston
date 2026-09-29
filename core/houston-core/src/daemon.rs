@@ -9197,7 +9197,7 @@ impl Daemon {
             .cloned();
         if let Some(session) = session {
             self.mark_detected(d.session, &session, provider);
-            self.note_transcript_link(d.session, d);
+            self.note_transcript_link(d.session, provider, d);
         }
         self.note_hook_last_message(
             d.session,
@@ -9230,7 +9230,28 @@ impl Daemon {
         verdict
     }
 
-    fn note_transcript_link(&self, session: u32, d: &crate::hook_drop::HookDrop) {
+    fn note_transcript_link(
+        &self,
+        session: u32,
+        provider: proto::AgentKind,
+        d: &crate::hook_drop::HookDrop,
+    ) {
+        if !crate::agent_events::names_root_conversation(provider, &d.event) {
+            return;
+        }
+        // Antigravity's first conversationId is the root one (see
+        // `correlate_antigravity_drop`); any other belongs to a sub-agent.
+        if provider == proto::AgentKind::Antigravity {
+            let roots = self
+                .antigravity_roots
+                .lock()
+                .expect("antigravity roots lock");
+            if let (Some(id), Some(root)) = (d.session_id.as_deref(), roots.get(&session)) {
+                if id != root {
+                    return;
+                }
+            }
+        }
         let mut links = self.transcript_links.lock().expect("transcript links lock");
         let Some(next) = transcript_link_update(
             links.get(&session),

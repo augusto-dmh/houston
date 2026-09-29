@@ -113,7 +113,7 @@ and a payload missing a field still delivers its transition:
 | `request_id` | OpenCode's permission or question request | pairs an asked event with its reply or rejection, including concurrent requests from child sessions |
 | `agent_id` | the sub-agent a `SubagentStart`/`SubagentStop` is about | correlation evidence, never a status |
 | `stop_continued` | the helper blocked this `Stop` with inbox rows | the daemon treats the pane as Working, never as TurnEnded |
-| `session_id` | Antigravity's `conversationId` | the root pin that tells a sub-agent's events apart from the pane's |
+| `session_id` | the CLI's conversation id (Antigravity's `conversationId`) | Antigravity's root pin that tells a sub-agent's events apart from the pane's; with `transcript_path`, the pane's stored conversation link (`sessions.native_session_id`). Only root-conversation events update the link: sub-agent lifecycle events, OpenCode's permission and question events (a child session raises them too) and an Antigravity id other than the root pin never replace it |
 | `fully_idle` | Antigravity `Stop.fullyIdle` | `false` means parked on `invoke_subagent` and decides nothing; `true` closes the round |
 | `tool_name` | Claude/Codex's top-level field or Antigravity's `toolCall.name` | identifies interactive tools and matches their completion to the open episode |
 
