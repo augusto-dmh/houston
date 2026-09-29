@@ -217,6 +217,7 @@ import { SourceControlPanel } from "./components/SourceControlPanel";
 import { SourceControlToggle } from "./components/SourceControlToggle";
 import { RailResizeHandle } from "./components/RailResizeHandle";
 import { useDismissedUpdate } from "./updateDismissal";
+import { liveSessionCount, UpdateInstallHost } from "./components/UpdateInstallHost";
 import { useCheckoutFacts } from "./useCheckoutFacts";
 import {
   addGrid,
@@ -3693,6 +3694,7 @@ export function App(): React.JSX.Element {
                           conn.client.updatePolicySet(policy);
                       }}
                       onOpenExternal={(url) => void openExternal(url)}
+                      liveSessionCount={liveSessionCount(sessions.values())}
                       onOpenLicense={() =>
                         void openExternal(
                           "https://github.com/theogmiguel/houston/blob/main/NOTICE",
@@ -3976,6 +3978,12 @@ export function App(): React.JSX.Element {
               onRejectRemaining={rejectRemainingHostKeys}
             />
           </AnimOut>
+
+          <UpdateInstallHost
+            update={update}
+            sessions={[...sessions.values()]}
+            onOpenExternal={(url) => void openExternal(url)}
+          />
 
           {pendingAct && !pendingAct.hasScreenshot && (
             <BrowserActConfirmModal
