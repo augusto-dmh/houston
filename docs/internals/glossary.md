@@ -69,7 +69,8 @@ named.
 | **managed marker** | The `--houston-managed[=<channel>]` sentinel that identifies Houston's entries in another tool's config, so uninstall removes exactly ours. | `claude_hooks.rs` |
 | **`AgentStatus`** | `Spawning`, `Working`, `Idle`, `NeedsInput`. Set only by `Daemon::set_status`, sourced from hooks or ACP. | `proto::AgentStatus` |
 | **`hooks_seen`** | Per-session flag: at least one hook event has arrived. Stands the spawn-grace watchdog down. | `daemon.rs::Session` |
-| **husk** | A restored session record with no live process. Reaped when idle and childless; never resumed. | `daemon.rs::dead` |
+| **husk** | A restored session record with no live process. Reaped when idle and childless; its Restart resumes its conversation when it holds a resume handle. | `daemon.rs::dead` |
+| **resume handle** | The root conversation id a Claude pane's hooks reported, kept once that conversation had a turn; the only id Houston passes to `--resume`. Carried to the respawned row; cleared by kill, close and Start fresh. | `sessions.resume_session_id` |
 | **ACP** | Agent Client Protocol: line-delimited JSON-RPC on the PTY, a second lawful status source. In a pane Houston never answers its permission requests. | `acp.rs` |
 | **liveness** | A kernel fact from procfs: does the session's pid have children. Gates the reaper and the close confirmation, never a status. | `has_child_procs` |
 | **ring** | A session's capped byte buffer of everything its PTY ever wrote, minus what has been trimmed off the front. The replay and restore path; not text. | `scrollback.rs` |
