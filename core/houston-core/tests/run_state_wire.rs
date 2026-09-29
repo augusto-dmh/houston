@@ -61,6 +61,8 @@ fn seed_husk(state_dir: &std::path::Path, dir: &std::path::Path) {
         inbox_unread: 0,
         tags: vec![],
         respawned_from: None,
+        resumable: false,
+        resume_notice: None,
     })
     .unwrap();
 }

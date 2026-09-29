@@ -113,6 +113,7 @@ function hostInfoFixture(overrides: Partial<HostInfo> = {}): HostInfo {
     uptime_ms: 3_600_000,
     live_sessions: 3,
     restore_budget: 6,
+    restore_resume: true,
     restore_deferred: 0,
     orchestration_depth_in_use: 1,
     orchestration_max_depth: 4,

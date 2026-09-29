@@ -156,6 +156,7 @@ const TERMINAL_INFO: SessionInfo = {
   children_waiting: 0,
   inbox_unread: 0,
   tags: [],
+  resumable: false,
 }
 const TERMINAL_THEME: ThemeName = 'warm-espresso'
 const TERMINAL_FONT_SIZE = 13
@@ -374,6 +375,7 @@ const SP_INFO_BASE: SessionInfo = {
   children_waiting: 0,
   inbox_unread: 0,
   tags: [],
+  resumable: false,
 }
 
 const SP_HANDOFF_STATE: HandoffUiState = { ...HANDOFF_STATE, session: SP_INFO_BASE.id }

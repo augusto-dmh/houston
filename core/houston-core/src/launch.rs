@@ -233,6 +233,19 @@ pub fn auto_approve_args(agent: proto::AgentKind) -> Option<Vec<String>> {
     }
 }
 
+/// The argv that reopens conversation `id` in a new process. Only providers whose
+/// resume-by-exact-id is verified answer; `--continue` is never an option, because it
+/// picks the newest conversation in the directory, not this pane's.
+pub fn resume_args(agent: proto::AgentKind, id: &str) -> Result<Vec<String>> {
+    match agent {
+        proto::AgentKind::Claude => Ok(vec!["--resume".to_string(), id.to_string()]),
+        other => bail!(
+            "resuming a conversation is not supported for {other:?} (only Claude); \
+             conversation {id:?} stays unresumed"
+        ),
+    }
+}
+
 pub fn auto_mode_args(agent: proto::AgentKind) -> Option<Vec<String>> {
     match agent {
         proto::AgentKind::Claude | proto::AgentKind::Grok => {
@@ -299,6 +312,31 @@ impl ApprovalMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_args_accepts_claude_and_refuses_every_other_provider_by_name() {
+        use proto::AgentKind as K;
+        assert_eq!(
+            resume_args(K::Claude, "c-1").unwrap(),
+            ["--resume".to_string(), "c-1".to_string()]
+        );
+        for kind in [
+            K::Codex,
+            K::Antigravity,
+            K::Shell,
+            K::Custom,
+            K::Opencode,
+            K::Cursor,
+            K::Grok,
+            K::Droid,
+            K::Copilot,
+            K::Aider,
+            K::Ssh,
+        ] {
+            let err = resume_args(kind, "c-1").unwrap_err().to_string();
+            assert!(err.contains(&format!("{kind:?}")), "{kind:?}: {err}");
+        }
+    }
 
     #[test]
     fn codex_launch_args_never_carry_the_hook_trust_bypass() {

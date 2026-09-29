@@ -83,6 +83,8 @@ fn stored_session(id: u32, ws: &Path, title: &str) -> proto::SessionInfo {
         inbox_unread: 0,
         tags: vec![],
         respawned_from: None,
+        resumable: false,
+        resume_notice: None,
     }
 }
 

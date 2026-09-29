@@ -400,6 +400,8 @@ async fn interrupted_sessions_are_restored_and_respawnable() {
             inbox_unread: 0,
             tags: vec![],
             respawned_from: None,
+            resumable: false,
+            resume_notice: None,
         })
         .unwrap();
     }

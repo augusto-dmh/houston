@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump once per wire-touching batch (`/ws` only); several PRs may land
 /// under one coordinated bump instead of each incrementing it.
-pub const PROTOCOL_VERSION: u32 = 118;
+pub const PROTOCOL_VERSION: u32 = 119;
 
 pub const VOICE_LEVEL_INTERVAL_MS: u64 = 50;
 
@@ -1278,6 +1278,13 @@ pub struct SessionInfo {
     #[serde(default)]
     #[cfg_attr(feature = "ts-gen", ts(optional = nullable, type = "number | null"))]
     pub respawned_from: Option<u32>,
+    /// The pane holds a conversation id that a Restart without `fresh` resumes.
+    #[serde(default)]
+    pub resumable: bool,
+    /// Why this pane started fresh instead of resuming its conversation.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts-gen", ts(optional = nullable))]
+    pub resume_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2115,6 +2122,9 @@ pub enum ClientMsg {
         #[serde(default)]
         #[cfg_attr(feature = "ts-gen", ts(optional = nullable))]
         force: Option<bool>,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts-gen", ts(optional = nullable))]
+        fresh: Option<bool>,
     },
     SessionCwd {
         session: u32,
@@ -2767,6 +2777,9 @@ pub enum ClientMsg {
     RestoreBudgetSet {
         budget: u32,
     },
+    RestoreResumeSet {
+        enabled: bool,
+    },
     MailboxRetentionSet {
         hours: u32,
     },
@@ -2867,6 +2880,10 @@ pub enum ServerMsg {
     SessionTagsSet {
         session: u32,
         tags: Vec<u32>,
+    },
+    SessionResumable {
+        session: u32,
+        resumable: bool,
     },
     TagList {
         tags: Vec<TagInfo>,
@@ -3302,6 +3319,7 @@ pub enum ServerMsg {
         uptime_ms: u64,
         live_sessions: u32,
         restore_budget: u32,
+        restore_resume: bool,
         restore_deferred: u32,
         orchestration_depth_in_use: u32,
         orchestration_max_depth: u32,

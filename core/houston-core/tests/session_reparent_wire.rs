@@ -95,6 +95,8 @@ fn reparenting_a_restored_husk_persists_and_survives_a_reopen() {
             inbox_unread: 0,
             tags: vec![],
             respawned_from: None,
+            resumable: false,
+            resume_notice: None,
         })
         .unwrap();
     }
@@ -163,6 +165,8 @@ fn reparent_refuses_a_swarm_tied_session() {
             inbox_unread: 0,
             tags: vec![],
             respawned_from: None,
+            resumable: false,
+            resume_notice: None,
         })
         .unwrap();
         let roster = vec![proto::SwarmRosterEntry {

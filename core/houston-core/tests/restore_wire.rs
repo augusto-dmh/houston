@@ -42,6 +42,8 @@ fn seed(state_dir: &std::path::Path, dirs: &[&std::path::Path], clean: bool) {
             inbox_unread: 0,
             tags: vec![],
             respawned_from: None,
+            resumable: false,
+            resume_notice: None,
         })
         .unwrap();
     }
@@ -82,6 +84,8 @@ fn seed_one(
         inbox_unread: 0,
         tags: vec![],
         respawned_from: None,
+        resumable: false,
+        resume_notice: None,
     })
     .unwrap();
 }
@@ -192,6 +196,8 @@ fn invalid_cwd_is_deferred_not_respawned() {
         inbox_unread: 0,
         tags: vec![],
         respawned_from: None,
+        resumable: false,
+        resume_notice: None,
     })
     .unwrap();
     drop(db);
@@ -360,6 +366,8 @@ fn no_flags_set_runs_normal_restore_policy() {
         inbox_unread: 0,
         tags: vec![],
         respawned_from: None,
+        resumable: false,
+        resume_notice: None,
     })
     .unwrap();
     drop(db);

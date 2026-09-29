@@ -32,6 +32,7 @@ const HOST: HostInfo = {
   uptime_ms: 0,
   live_sessions: 0,
   restore_budget: 0,
+  restore_resume: true,
   restore_deferred: 0,
   orchestration_depth_in_use: 0,
   orchestration_max_depth: 0,
