@@ -130,6 +130,7 @@ async fn daemon_handoff_to(
         manage_version: proto::MANAGE_VERSION,
         verb: proto::ManageVerb::DaemonHandoff,
         candidate_bin: candidate_bin.map(str::to_string),
+        expected_sessions: None,
     };
     client
         .post(format!("http://127.0.0.1:{port}/manage"))
@@ -447,6 +448,7 @@ async fn manage_shutdown(port: u16, token: &str) {
             manage_version: proto::MANAGE_VERSION,
             verb: proto::ManageVerb::DaemonShutdown,
             candidate_bin: None,
+            expected_sessions: None,
         })
         .timeout(Duration::from_secs(10))
         .send()
@@ -715,6 +717,38 @@ async fn a_signalled_session_finishes_through_the_supervisor_with_no_exit_code()
     .unwrap();
 
     assert_eq!(wait_for_exit(&mut ws, session_id).await, None);
+
+    manage_shutdown(after.port, &after.token).await;
+    poll_until(POLL_TIMEOUT, || {
+        guard.0.try_wait().expect("poll supervisor exit")
+    });
+}
+
+#[tokio::test]
+async fn shutdown_ends_an_adopted_session_that_ignores_sigterm() {
+    let home = tempfile::tempdir().unwrap();
+    let channel_dir = home.path().join(".houston-dev");
+    let _channel_guard = ChannelGuard(channel_dir.clone());
+    let mut guard = spawn_supervised_daemon(home.path(), &channel_dir);
+    let project = tempfile::tempdir().unwrap();
+    let cfg_path = channel_dir.join("daemon.json");
+    // An interactive shell ignores SIGTERM; `read` keeps it a single process.
+    let (before, _session_id, ws) = supervised_daemon_with_session(
+        home.path(),
+        &channel_dir,
+        project.path(),
+        vec!["sh", "-c", "trap '' TERM; read line"],
+    )
+    .await;
+    drop(ws);
+
+    let result = daemon_handoff(before.port, &before.token).await;
+    assert!(result.accepted, "{result:?}");
+    let generation = result.generation.unwrap();
+    let after = poll_until(POLL_TIMEOUT, || {
+        let f = read_daemon_json(&cfg_path)?;
+        (f.pid != before.pid && f.generation == Some(generation)).then_some(f)
+    });
 
     manage_shutdown(after.port, &after.token).await;
     poll_until(POLL_TIMEOUT, || {
