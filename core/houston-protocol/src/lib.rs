@@ -899,15 +899,6 @@ impl SessionContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-gen", derive(ts_rs::TS), ts(export))]
-#[serde(rename_all = "kebab-case")]
-pub enum AgentNoticeKind {
-    Finished,
-    NeedsInput,
-    Error,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts-gen", derive(ts_rs::TS), ts(export))]
 pub struct OrchestrationCaps {
     pub max_live_children: u32,
     pub max_spawn_depth: u32,
@@ -3116,10 +3107,6 @@ pub enum ServerMsg {
         session: u32,
         #[cfg_attr(feature = "ts-gen", ts(optional = nullable))]
         context: Option<SessionContext>,
-    },
-    AgentNotice {
-        session: u32,
-        kind: AgentNoticeKind,
     },
     OrchestrationState {
         caps: OrchestrationCaps,
