@@ -19,6 +19,7 @@ export const SETTINGS_ROW_REGISTRY: Partial<Record<SettingsSectionId, readonly s
   shortcuts: ['Enable shortcuts', 'Pass through to terminal'],
   'workspace-defaults': [
     'Restore budget',
+    'Resume conversations when restoring panes',
     'Close idle background sessions',
     'Idle for',
     'Open links in a browser pane'

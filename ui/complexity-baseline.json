@@ -75,8 +75,8 @@
       "over": 1
     },
     "src/renderer/src/components/SessionPane.tsx": {
-      "total": 89,
-      "worst": 29,
+      "total": 82,
+      "worst": 26,
       "over": 1
     },
     "src/renderer/src/components/SshConnectModal.tsx": {

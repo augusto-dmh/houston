@@ -69,6 +69,7 @@ export function baseSettingsViewProps(): React.ComponentProps<typeof SettingsVie
     onContact: () => {},
     onOpenLicense: () => {},
     onRestoreBudgetSet: () => {},
+    onRestoreResumeSet: () => {},
     sessionPolicy: null,
     onSessionPolicy: () => {},
     orchestrationEnabled: true,

@@ -77,6 +77,7 @@ function baseProps(overrides: {
     onContact: () => {},
     onOpenLicense: () => {},
     onRestoreBudgetSet: () => {},
+    onRestoreResumeSet: () => {},
     sessionPolicy: null,
     onSessionPolicy: () => {},
     orchestrationEnabled: true,

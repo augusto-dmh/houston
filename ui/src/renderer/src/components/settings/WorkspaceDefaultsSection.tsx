@@ -6,6 +6,7 @@ import { NumberSetting, Row, SectionHead, SubHead } from './shared'
 
 export interface WorkspaceDefaultsSectionProps {
   onRestoreBudgetSet: (n: number) => void
+  onRestoreResumeSet: (on: boolean) => void
   openLinksInPane: boolean
   onOpenLinksInPane: (on: boolean) => void
   historyWorkspace: string | null
@@ -17,6 +18,7 @@ export interface WorkspaceDefaultsSectionProps {
 
 export function WorkspaceDefaultsSection({
   onRestoreBudgetSet,
+  onRestoreResumeSet,
   openLinksInPane,
   onOpenLinksInPane,
   historyWorkspace,
@@ -48,6 +50,17 @@ export function WorkspaceDefaultsSection({
               onCommit={onRestoreBudgetSet}
             />
           )}
+        </Row>
+        <Row
+          title="Resume conversations when restoring panes"
+          desc="After an orderly shutdown, each restored Claude pane reopens the conversation it was running. Nothing is sent to the model until you type. Off: restored panes start a fresh CLI."
+        >
+          <Toggle
+            on={hostInfo?.restore_resume ?? true}
+            disabled={hostInfo === null}
+            onChange={onRestoreResumeSet}
+            data-testid="restore-resume-switch"
+          />
         </Row>
       </SettingsList>
       <SubHead>Background sessions</SubHead>

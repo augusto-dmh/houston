@@ -282,6 +282,7 @@ const settingsProps: Parameters<typeof SettingsView>[0] = {
   onHistoryIgnoreGlobsSet: () => {},
   onOpenLicense: () => {},
   onRestoreBudgetSet: () => {},
+  onRestoreResumeSet: () => {},
   sessionPolicy: null,
   onSessionPolicy: () => {},
   orchestrationEnabled: true,

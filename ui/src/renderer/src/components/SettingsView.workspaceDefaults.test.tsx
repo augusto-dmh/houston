@@ -65,6 +65,41 @@ describe('Settings › Workspaces (id `workspace-defaults`)', () => {
     expect(committed).toEqual([20])
   })
 
+  it("the resume toggle shows the daemon's value and sends the change", () => {
+    const sent: boolean[] = []
+    act(() => {
+      root.render(
+        <SettingsView
+          {...baseSettingsViewProps()}
+          hostInfo={hostInfoFixture({ restore_resume: false })}
+          onRestoreResumeSet={(on) => sent.push(on)}
+        />
+      )
+    })
+    openWorkspaceDefaults()
+    expect(container.textContent).toContain('Resume conversations when restoring panes')
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="restore-resume-switch"]')
+    if (!toggle) throw new Error('no restore-resume switch')
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    act(() => toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    expect(sent).toEqual([true])
+
+    act(() => {
+      root.render(
+        <SettingsView
+          {...baseSettingsViewProps()}
+          hostInfo={hostInfoFixture({ restore_resume: true })}
+          onRestoreResumeSet={(on) => sent.push(on)}
+        />
+      )
+    })
+    expect(
+      container
+        .querySelector('[data-testid="restore-resume-switch"]')
+        ?.getAttribute('aria-checked')
+    ).toBe('true')
+  })
+
   it('settings-55: shows "Asking the daemon…" instead of a bogus number before host_info answers', () => {
     act(() => {
       root.render(<SettingsView {...baseSettingsViewProps()} hostInfo={null} />)
