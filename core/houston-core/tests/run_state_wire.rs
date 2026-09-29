@@ -131,7 +131,7 @@ fn ungraceful_exit_reports_abnormal_exit_with_session_count_and_runtime() {
     let recovery = daemon2.recovery_summary().expect("husks present");
     assert!(
         recovery.crashed,
-        "must still defer as a crash: {recovery:?}"
+        "must still report the previous crash: {recovery:?}"
     );
 }
 

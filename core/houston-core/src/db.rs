@@ -1258,6 +1258,12 @@ impl Db {
         add_column_if_missing(
             &conn,
             "sessions",
+            "profile_config_dir",
+            "profile_config_dir TEXT",
+        )?;
+        add_column_if_missing(
+            &conn,
+            "sessions",
             "session_origin",
             "session_origin INTEGER",
         )?;
@@ -2134,6 +2140,24 @@ impl Db {
         )?)
     }
 
+    pub fn set_session_profile_config_dir(&self, id: u32, directory: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().expect("db lock");
+        conn.execute(
+            "UPDATE sessions SET profile_config_dir = ?2 WHERE id = ?1",
+            rusqlite::params![id, directory],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_profile_config_dir(&self, id: u32) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("db lock");
+        Ok(conn.query_row(
+            "SELECT profile_config_dir FROM sessions WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The conversation a Restart or restore resumes, with the transcript path the
     /// CLI reported for it; `None` clears it.
     pub fn set_session_resume_handle(
@@ -2328,10 +2352,11 @@ impl Db {
     ) -> Result<()> {
         let conn = self.conn.lock().expect("db lock");
         let ended = !state.is_live();
+        // Close can commit after a waiter checks the row but before its final update.
         conn.execute(
             "UPDATE sessions SET state = ?2, exit_code = COALESCE(?3, exit_code),
                     ended_at = CASE WHEN ?4 THEN unixepoch() ELSE ended_at END
-             WHERE id = ?1",
+             WHERE id = ?1 AND state != 'closed'",
             rusqlite::params![id, state_str(state), exit_code, ended],
         )?;
         Ok(())
@@ -4640,6 +4665,13 @@ mod tests {
 
         let db = Db::open(&path).unwrap();
         assert_eq!(db.session_resume_handle(7).unwrap(), None);
+        assert_eq!(db.session_profile_config_dir(7).unwrap(), None);
+        db.set_session_profile_config_dir(7, Some("/tmp/profile-a"))
+            .unwrap();
+        assert_eq!(
+            db.session_profile_config_dir(7).unwrap().as_deref(),
+            Some("/tmp/profile-a")
+        );
         db.set_session_resume_handle(7, Some(("conv-a", Some("/t/conv-a.jsonl"))))
             .unwrap();
         assert_eq!(
@@ -4946,6 +4978,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("42"), "error should name the id: {err}");
+    }
+
+    #[test]
+    fn a_closed_session_cannot_be_reopened_by_a_late_completion() {
+        let state = tempfile::tempdir().unwrap();
+        let db = Db::open(&state.path().join("test.db")).unwrap();
+        db.insert_session(&info(1, proto::SessionState::Running))
+            .unwrap();
+        db.mark_closed(1).unwrap();
+
+        db.update_session_state(1, proto::SessionState::Exited, Some(0))
+            .unwrap();
+
+        assert!(db.session_is_closed(1).unwrap());
+        assert_eq!(db.mark_live_as_interrupted().unwrap(), 0);
     }
 
     #[test]

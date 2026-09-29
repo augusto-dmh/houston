@@ -131,7 +131,7 @@ Seven recorded carve-outs stand. Further exceptions need the same recorded treat
 | 4 | `<the CLI's own transcriptPath>, Antigravity only` | The path comes from the provider's own hook payload and is never constructed by Houston; the last assistant entry only; read once, at a turn end, in the helper process; fail-soft (any error is no last message, never an error to the CLI); capped at the submit cap. Terms: `core/houston-core/src/antigravity_transcript.rs` |
 | 5 | `<the CLI's own transcript_path>, Claude and Codex only` | Read only on turn completion, from the hook-reported path; at most the last 8 MiB. Claude's latest main-agent usage and Codex's latest `token_count` provide context occupancy. Retain only token counts, model id and compaction state; never drive agent status, retain content, scan directories or watch transcripts. Missing data hides the indicator. Terms: `core/houston-core/src/context_window.rs` |
 | 6 | `~/.claude/projects/<workspace slug>*/*.jsonl` (and `$CLAUDE_CONFIG_DIR/projects`), `~/.codex/sessions/**/*.jsonl` (or `$CODEX_HOME/sessions`), Claude and Codex only | Read by `hs-harness digest`, never by the daemon or the app: the agent of a harness review run calls it inside its own visible pane, and it refuses unless `HOUSTON_ROUTINE_RUN` is set, which only a routine run's pane has. Only transcripts whose cwd is the workspace or below it; OpenCode, Cursor, Grok and Antigravity are refused by name. Output only under `<workspace>/.houston/harness/<run>/`, capped at 64 KiB per session line and 2 MiB per digest; the digest never enters the database and nothing drives status. What enters it is what the run's agent publishes through `harness_publish`: the bounded fields of `findings.json`, including its short quotes. No timer, watcher or boot scan: a run happens because the user created the review routine and pressed Run review or enabled its cadence. Terms: `core/houston-core/src/harness/` |
-| 7 | `<the CLI's own transcript_path>`, Claude only | Metadata only: before a respawn passes `--resume <id>`, `fs::metadata` on the path the hook reported with that id says whether the transcript exists and is non-empty. The file is never opened, the path is never constructed, and nothing drives status. Terms: `daemon.rs::resume_check` |
+| 7 | `<the CLI's own transcript_path>`, Claude and Codex only | Metadata only: before a respawn passes its exact-ID resume arguments, `fs::metadata` on the path the hook reported with that id says whether the transcript exists and is non-empty. The file is never opened, the path is never constructed, and nothing drives status. Terms: `daemon.rs::resume_check` |
 
 ### App-initiated config writes use reversible managed markers
 
@@ -279,17 +279,24 @@ overwritten by a later title.
 
 ### A pane resumes only its own conversation, by exact id
 
-Boot restore and a Restart relaunch a Claude pane with `--resume <id>`, where the id is the
-pane's resume handle: the root conversation id its hooks reported, kept only once that
-conversation had a turn. Never `--continue`/`-c`, which picks the newest conversation in a
-directory rather than this pane's. No ledger: the handle is two columns on the session row.
-No recovery banner: a resume that works shows only the CLI's own redraw, and a fallback shows
-one line saying why. No husk revival: a crash still defers every session, and only the user's
-Restart resumes one. No list or history of resumable sessions, which would need transcript
-parsing. A routine run is always a fresh context: nothing the daemon runs unattended carries a
-previous turn's id forward, so routine and harness-review panes never get a handle. A
-provider without a verified resume-by-id flag is refused by name in `launch::resume_args`.
-Widening any of this reverses a recorded ruling — say so out loud.
+Boot restore and Restart relaunch Claude with `--resume <id>` and Codex with `resume <id>`.
+The handle is the root conversation ID and transcript path reported by native hooks,
+retained once the conversation has a turn. Codex versions without those hook fields do
+not acquire a handle. No command chooses the latest conversation in a directory.
+
+Clean shutdown and crash use the same restore policy, budget and safe-mode switch.
+Restoration supplies no prompt: the CLI waits for input rather than repeating work.
+Changing cwd, losing the agent profile or changing its configuration directory invalidates
+the carried handle, including when
+automatic conversation resume is disabled. Kill, Close and Start fresh clear it; late
+hooks from a killed or removed session cannot recreate it. Kill and Close persist their
+terminal state before returning, so an immediate crash cannot revive the pane. A failed resume starts fresh
+once with a visible reason, while transient failures retain the handle for manual retry.
+
+Routine and harness-review runs always start fresh, and orchestrated children cannot be
+respawned without their mission. Unsupported providers are refused by name in
+`launch::resume_args`. There is no transcript scan or history ledger; the handle lives
+on the session row and metadata validation never drives status.
 
 ## Wire
 

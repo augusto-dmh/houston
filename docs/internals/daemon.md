@@ -123,7 +123,14 @@ conversation id before any hook arrives. `respawn_with` decides what a respawned
 handle once `resume_check` passes (transcript metadata, recorded cwd, profile, no other live
 pane on the id); otherwise, and for `Fresh`, the pane starts a fresh CLI. A failed check, or
 a resumed CLI exiting non-zero within `RESUME_EARLY_EXIT` (10 s: an unknown id exits 1 at
-once), relaunches it fresh once with `SessionInfo.resume_notice` and keeps the handle.
+once), relaunches it fresh once with `SessionInfo.resume_notice`. Transient failures keep
+the handle for retry; a changed cwd, deleted profile or changed profile configuration
+directory clears it before creating the new
+row. Codex uses `resume <id>` with the ID and transcript path supplied by native hooks.
+The resolved profile directory is recorded at launch; hooks cannot move that session's
+conversation into an edited or recreated profile's account namespace.
+Clean shutdown and crash both apply the same restore policy and budget, preserving the
+previous crash in the recovery summary.
 
 `mint_mcp_launch` (`mcp_launch.rs`) adds the per-pane MCP argv and env; `shellint::injection`
 adds the rcfile args and env when shell integration is on. `env_hygiene::scrub()` has already

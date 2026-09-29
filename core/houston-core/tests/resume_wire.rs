@@ -132,7 +132,7 @@ fn flag(argv: &[String], name: &str) -> Option<String> {
 }
 
 fn resume_of(argv: &[String]) -> Option<String> {
-    flag(argv, "--resume")
+    flag(argv, "--resume").or_else(|| flag(argv, "resume"))
 }
 
 fn config_dir_of(argv: &[String]) -> String {
@@ -192,7 +192,8 @@ fn claude_pane(daemon: &Arc<Daemon>, dir: &Path, profile: Option<u32>) -> proto:
 fn restored_from(sessions: &[proto::SessionInfo], old: u32) -> &proto::SessionInfo {
     sessions
         .iter()
-        .find(|s| s.session_origin == Some(old))
+        .filter(|s| s.session_origin == Some(old))
+        .max_by_key(|s| s.id)
         .unwrap_or_else(|| panic!("session {old} was not restored: {sessions:?}"))
 }
 
@@ -567,7 +568,7 @@ async fn the_handle_survives_consecutive_restores() {
     );
 
     let second = reboot(&env, &first);
-    let twice = restored_from(&second.list(), once.id).clone();
+    let twice = restored_from(&second.list(), 5).clone();
     assert_eq!(
         resume_of(&argv_of(&env, twice.id).await).as_deref(),
         Some("conv-h")
@@ -589,6 +590,14 @@ async fn with_restore_resume_off_every_pane_restores_fresh() {
     let daemon = boot(&env);
     let restored = restored_from(&daemon.list(), 5).clone();
     assert_eq!(resume_of(&argv_of(&env, restored.id).await), None);
+    let restarted = daemon
+        .respawn(restored.id, false, None, None, true)
+        .unwrap();
+    assert_eq!(
+        resume_of(&argv_of(&env, restarted.id).await).as_deref(),
+        Some("conv-off"),
+        "disabling boot resume keeps a valid handle for an explicit restart"
+    );
 }
 
 fn upsert_profile(daemon: &Daemon, name: &str, dir: &str) -> u32 {
@@ -746,18 +755,18 @@ async fn a_resume_that_exits_early_relaunches_fresh_once() {
     let path = transcript(&env, "conv-rejected", b"{}\n");
     seed_claude(&env, 5, &ws, &ws, Some(("conv-rejected", Some(&path))));
     clean_shutdown(&env);
+    let resumed_id = Db::open(&env.db_path()).unwrap().next_session_id().unwrap();
 
     let daemon = boot(&env);
-    let resumed = restored_from(&daemon.list(), 5).clone();
     assert_eq!(
-        resume_of(&argv_of(&env, resumed.id).await).as_deref(),
+        resume_of(&argv_of(&env, resumed_id).await).as_deref(),
         Some("conv-rejected")
     );
     wait_for_session(&daemon, "the fresh relaunch", |s| {
-        s.session_origin == Some(resumed.id)
+        s.session_origin == Some(5) && s.id != resumed_id
     })
     .await;
-    let fallback = restored_from(&daemon.list(), resumed.id).clone();
+    let fallback = restored_from(&daemon.list(), 5).clone();
     assert_eq!(resume_of(&argv_of(&env, fallback.id).await), None);
     let notice = fallback
         .resume_notice
@@ -776,7 +785,7 @@ async fn a_resume_that_exits_early_relaunches_fresh_once() {
         !daemon
             .list()
             .iter()
-            .any(|s| s.session_origin == Some(fallback.id)),
+            .any(|s| s.session_origin == Some(5) && s.id != fallback.id),
         "one fallback, never a loop"
     );
 }
@@ -802,13 +811,13 @@ async fn a_resumed_cli_that_exits_cleanly_is_not_relaunched() {
         !daemon
             .list()
             .iter()
-            .any(|s| s.session_origin == Some(resumed.id)),
+            .any(|s| s.session_origin == Some(5) && s.id != resumed.id),
         "a clean exit is the user's"
     );
 }
 
 #[tokio::test]
-async fn a_provider_without_resume_gets_no_handle() {
+async fn a_codex_pane_restores_its_exact_thread_id() {
     let env = setup().await;
     let daemon = boot(&env);
     let ws = project(&env, "ws");
@@ -845,15 +854,21 @@ async fn a_provider_without_resume_gets_no_handle() {
         )
         .await;
     }
-    assert_eq!(handle_in(&env, info.id), None);
+    assert_eq!(
+        handle_in(&env, info.id),
+        Some(("codex-thread".into(), Some(path)))
+    );
 
     let after = reboot(&env, &daemon);
     let restored = restored_from(&after.list(), info.id).clone();
     let argv = argv_of(&env, restored.id).await;
-    assert!(
-        !argv.iter().any(|a| a == "resume" || a == "--resume"),
-        "{argv:?}"
+    assert_eq!(resume_of(&argv).as_deref(), Some("codex-thread"));
+    assert!(!argv.iter().any(|a| a == "--last"), "{argv:?}");
+    assert_eq!(
+        native_in(&env, restored.id).as_deref(),
+        Some("codex-thread")
     );
+    assert!(restored.resumable);
     assert_eq!(restored.resume_notice, None);
 }
 
@@ -914,26 +929,18 @@ async fn start_fresh_over_the_wire_drops_the_handle() {
 }
 
 #[tokio::test]
-async fn a_husk_left_by_a_crash_resumes_on_restart() {
+async fn a_pane_left_by_a_crash_automatically_restores_its_exact_conversation() {
     let env = setup().await;
     let ws = project(&env, "ws");
     let path = transcript(&env, "conv-crash", b"{}\n");
     seed_claude(&env, 5, &ws, &ws, Some(("conv-crash", Some(&path))));
 
     let daemon = boot(&env);
-    let husk = daemon
-        .list()
-        .into_iter()
-        .find(|s| s.id == 5)
-        .expect("the crash leaves a husk");
+    let restored = restored_from(&daemon.list(), 5).clone();
+    assert_eq!(restored.restore_deferred, None);
+    assert!(restored.resumable);
     assert_eq!(
-        husk.restore_deferred,
-        Some(proto::RestoreReason::PreviousCrash)
-    );
-    assert!(husk.resumable);
-    let restarted = daemon.respawn(5, false, None, None, false).unwrap();
-    assert_eq!(
-        resume_of(&argv_of(&env, restarted.id).await).as_deref(),
+        resume_of(&argv_of(&env, restored.id).await).as_deref(),
         Some("conv-crash")
     );
 }
@@ -1129,4 +1136,108 @@ async fn a_resumed_pane_keeps_its_id_through_a_resume_hook() {
         handle_in(&env, restored.id),
         Some(("conv-r".to_string(), Some(path)))
     );
+}
+
+#[tokio::test]
+async fn a_late_stop_after_kill_does_not_recreate_the_resume_handle() {
+    let env = setup().await;
+    let daemon = boot(&env);
+    let ws = project(&env, "ws");
+    let (pane, conversation, path) = pane_with_a_turn(&env, &daemon, &ws, None).await;
+    let pending = run_hook("Stop", pane.id, fixture(STOP, &conversation, &path, &ws)).await;
+
+    daemon.kill(pane.id).unwrap();
+    wait_for_state(&daemon, pane.id, proto::SessionState::Killed).await;
+    assert_eq!(handle_in(&env, pane.id), None);
+    apply_drop(&env, &daemon, pending).await;
+    assert_eq!(
+        handle_in(&env, pane.id),
+        None,
+        "a queued Stop must not undo Kill"
+    );
+}
+
+#[tokio::test]
+async fn a_second_restart_does_not_resume_in_a_relocated_folder() {
+    for resume_on_restore in [true, false] {
+        let env = setup().await;
+        let ws = project(&env, "ws");
+        let sub = ws.join("worktree");
+        std::fs::create_dir_all(&sub).unwrap();
+        let path = transcript(&env, "conv-cwd", b"{}\n");
+        seed_claude(&env, 5, &ws, &sub, Some(("conv-cwd", Some(&path))));
+        Db::open(&env.db_path())
+            .unwrap()
+            .set_setting("restore_resume", if resume_on_restore { "1" } else { "0" })
+            .unwrap();
+        std::fs::remove_dir(&sub).unwrap();
+        clean_shutdown(&env);
+
+        let daemon = boot(&env);
+        let restored = restored_from(&daemon.list(), 5).clone();
+        assert_eq!(resume_of(&argv_of(&env, restored.id).await), None);
+        assert_eq!(restored.cwd, ws.display().to_string());
+        let next = daemon
+            .respawn(restored.id, false, None, None, true)
+            .unwrap();
+        assert_eq!(
+            resume_of(&argv_of(&env, next.id).await),
+            None,
+            "restore_resume={resume_on_restore}: a second restart must not resume the worktree conversation in the workspace"
+        );
+        assert!(!restored.resumable);
+        assert_eq!(handle_in(&env, next.id), None);
+    }
+}
+
+#[tokio::test]
+async fn a_second_restart_does_not_resume_on_a_deleted_profiles_default_account() {
+    for resume_on_restore in [true, false] {
+        let env = setup().await;
+        let daemon = boot(&env);
+        daemon.set_restore_resume(resume_on_restore).unwrap();
+        let ws = project(&env, "ws");
+        let work = env.state.path().join("work-config").display().to_string();
+        let profile = upsert_profile(&daemon, "work", &work);
+        let (pane, _, _) = pane_with_a_turn(&env, &daemon, &ws, Some(profile)).await;
+        daemon.agent_profile_delete(profile).unwrap();
+
+        let after = reboot(&env, &daemon);
+        let restored = restored_from(&after.list(), pane.id).clone();
+        assert_eq!(resume_of(&argv_of(&env, restored.id).await), None);
+        assert_eq!(restored.profile_label, None);
+        let next = after.respawn(restored.id, false, None, None, true).unwrap();
+        assert_eq!(
+            resume_of(&argv_of(&env, next.id).await),
+            None,
+            "restore_resume={resume_on_restore}: a second restart must not resume the profile conversation on the default account"
+        );
+        assert!(!restored.resumable);
+        assert_eq!(handle_in(&env, next.id), None);
+    }
+}
+
+#[tokio::test]
+async fn restarting_in_another_existing_folder_discards_the_previous_conversation() {
+    let env = setup().await;
+    let daemon = boot(&env);
+    let ws = project(&env, "ws");
+    let other = project(&env, "other");
+    let (pane, _, _) = pane_with_a_turn(&env, &daemon, &ws, None).await;
+
+    let moved = daemon
+        .respawn(pane.id, false, Some(other.clone()), None, true)
+        .unwrap();
+    assert_eq!(resume_of(&argv_of(&env, moved.id).await), None);
+    assert!(!moved.resumable);
+    let notice = moved.resume_notice.expect("the changed folder says why");
+    assert!(
+        notice.contains(&ws.display().to_string()) && notice.contains(&other.display().to_string()),
+        "{notice}"
+    );
+    assert!(!notice.contains("no longer exists"), "{notice}");
+
+    let next = daemon.respawn(moved.id, false, None, None, true).unwrap();
+    assert_eq!(resume_of(&argv_of(&env, next.id).await), None);
+    assert_eq!(handle_in(&env, next.id), None);
 }

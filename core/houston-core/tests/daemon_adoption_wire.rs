@@ -178,6 +178,7 @@ async fn handoff_transfers_a_live_session_to_a_new_generation() {
             shell_integration: Some(false),
             cwd: None,
             shell: None,
+            fresh: None,
         })
         .unwrap(),
     ))

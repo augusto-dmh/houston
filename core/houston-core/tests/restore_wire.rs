@@ -139,7 +139,7 @@ fn clean_shutdown_respawns_within_budget_and_defers_the_rest() {
 }
 
 #[test]
-fn crash_defers_everything() {
+fn crash_restores_with_the_same_budget_as_clean_shutdown() {
     let _env = env_lock();
     std::env::set_var("SHELL", "/bin/sh");
     std::env::remove_var("HOUSTON_SAFE_MODE");
@@ -151,14 +151,12 @@ fn crash_defers_everything() {
 
     let (sessions, recovery) = boot_and_list(state.path());
     assert_eq!(sessions.len(), 1);
-    assert_eq!(
-        sessions[0].restore_deferred,
-        Some(proto::RestoreReason::PreviousCrash)
-    );
-    assert_eq!(sessions[0].state, proto::SessionState::Interrupted);
+    assert_eq!(sessions[0].restore_deferred, None);
+    assert_eq!(sessions[0].state, proto::SessionState::Running);
+    assert_eq!(sessions[0].session_origin, Some(1));
     let r = recovery.expect("summary");
     assert!(r.crashed);
-    assert_eq!(r.respawned, 0);
+    assert_eq!((r.respawned, r.deferred), (1, 0));
 }
 
 #[test]
@@ -493,7 +491,7 @@ fn an_agent_husk_comes_back_live_and_never_as_a_corpse() {
 }
 
 #[test]
-fn a_restored_session_names_the_husk_it_replaced() {
+fn a_restored_session_keeps_its_original_identity() {
     let _env = env_lock();
     std::env::set_var("SHELL", "/bin/sh");
     std::env::remove_var("HOUSTON_RESTORE_BUDGET");
@@ -501,15 +499,22 @@ fn a_restored_session_names_the_husk_it_replaced() {
 
     let state = tempfile::tempdir().unwrap();
     let proj = tempfile::tempdir().unwrap();
-    seed_one(state.path(), 7, proj.path(), proto::AgentKind::Shell, None);
+    seed_one(
+        state.path(),
+        7,
+        proj.path(),
+        proto::AgentKind::Shell,
+        None,
+        None,
+    );
     std::fs::write(state.path().join("clean-shutdown"), b"").unwrap();
 
     let (sessions, _) = boot_and_list(state.path());
     let restored = sessions
         .iter()
-        .find(|s| s.title == "Husk-8")
+        .find(|s| s.title == "Husk-7")
         .expect("the restored pane is listed");
-    assert_ne!(restored.id, 8, "respawn mints a new id: {restored:?}");
+    assert_ne!(restored.id, 7, "respawn mints a new id: {restored:?}");
     assert_eq!(
         restored.session_origin,
         Some(7),

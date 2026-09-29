@@ -101,22 +101,27 @@ There is no undo for a killed session; the pane is gone from the grid along with
 
 Settings ▸ Workspaces ▸ Close idle background sessions can end sessions that have sat
 idle in the background, after the "Idle for" duration you set. Settings ▸ Workspaces ▸
-Restore budget caps how many sessions Houston brings back automatically when it starts
-again after a clean shutdown, rather than restoring every session that was open.
+Restore budget caps how many sessions Houston brings back automatically after a shutdown
+or crash. Settings ▸ Workspaces ▸ Restore budget controls this limit; safe mode disables
+automatic restoration.
 
-A restored session, or one you restart from its pane, comes back in the same cell it
-left: the same grid, split and stack, whichever grid is active. It runs on the same agent
-profile. If that profile has since been deleted, it runs on the default account and the
-pane no longer shows the profile's name.
+A restored or restarted session comes back in the same cell: the same grid, split and
+stack, including repeated restarts while the application is closed and All workspaces.
+It runs on the same agent profile. If that profile has been deleted, it runs on the
+default account and no longer shows the profile's name.
 
-A restored Claude pane reopens the conversation it was running once that conversation has
-had at least one prompt: the CLI redraws it and waits, and nothing is sent to the model
-until you type. Your first prompt sends the conversation to the model again, as `/resume`
-does. Settings ▸ Workspaces ▸ Resume conversations when restoring panes turns this off.
-Restarting a Claude pane offers Resume conversation and Start fresh; Start fresh, killing
-the pane and closing it each forget the conversation. If the conversation cannot be
-reopened, because its transcript is gone, its folder no longer exists, its agent profile
-was deleted, another pane already has it open, or the CLI exits with an error within
-10 seconds, the pane starts a fresh CLI and says why in one line. After a crash, restored
-panes wait for you to restart them. Other agents, shells and routine runs always start
-fresh.
+Claude and Codex panes reopen their exact conversation after a shutdown or crash, whether
+working or waiting for input, once that conversation has had a prompt. The CLI restores
+its history and waits for your next input; Houston does not resend a prompt or repeat an
+interrupted tool. Settings ▸ Workspaces ▸ Resume conversations when restoring panes turns
+this off. Codex requires native hooks that report the session ID and transcript path;
+older CLIs without those fields start fresh.
+
+Restart offers Resume conversation and Start fresh when a pane holds a conversation.
+Start fresh, Kill and Close each forget it. If its transcript is gone, its folder changes,
+its agent profile was deleted, another pane already has it open, or the resumed CLI exits
+with an error within 10 seconds, the pane starts fresh and says why. Changing the folder
+or changing its profile's configuration directory discards the old conversation handle.
+Losing the profile also discards it. Other agents, shells and
+routine runs start fresh. Sessions beyond the restore budget remain available for manual
+restart.

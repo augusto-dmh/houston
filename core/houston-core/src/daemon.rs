@@ -2410,28 +2410,16 @@ impl Daemon {
         );
 
         let safe_mode = self.safe_mode_flags.disable_auto_restore;
-        if safe_mode || crashed {
-            let reason = if safe_mode {
-                R::SafeMode
-            } else {
-                R::PreviousCrash
-            };
+        if safe_mode {
             for c in &candidates {
-                defer(c.id, reason);
+                defer(c.id, R::SafeMode);
             }
             *self.recovery.lock().expect("recovery lock") = Some(proto::RecoverySummary {
                 respawned: 0,
                 deferred: total,
                 crashed,
             });
-            tracing::info!(
-                "boot restore: deferred all {total} husk(s) ({})",
-                if safe_mode {
-                    "safe mode"
-                } else {
-                    "previous crash"
-                }
-            );
+            tracing::info!("boot restore: deferred all {total} husk(s) (safe mode)");
             return;
         }
 
@@ -2497,7 +2485,7 @@ impl Daemon {
         *self.recovery.lock().expect("recovery lock") = Some(proto::RecoverySummary {
             respawned,
             deferred,
-            crashed: false,
+            crashed,
         });
         tracing::info!("boot restore: respawned {respawned}, deferred {deferred}");
     }
@@ -4251,6 +4239,18 @@ impl Daemon {
             _ => unreachable!("agent_profile_slug already restricted to claude/codex"),
         }
         .to_string()
+    }
+
+    fn agent_profile_config_dir(agent: proto::AgentKind, env: &[(String, String)]) -> Option<&str> {
+        let key = match agent {
+            proto::AgentKind::Claude => "CLAUDE_CONFIG_DIR",
+            proto::AgentKind::Codex => "CODEX_HOME",
+            _ => return None,
+        };
+        env.iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, directory)| directory.as_str())
     }
 
     fn expand_profile_dir(&self, slug: &str, raw: String) -> String {
@@ -6620,6 +6620,11 @@ impl Daemon {
             tracing::warn!("reading session {old_id}'s resume handle: {e:#}");
             None
         });
+        let recorded_profile_dir = if handle.is_some() {
+            self.db.session_profile_config_dir(old_id)?
+        } else {
+            None
+        };
         let from_live = self
             .sessions
             .lock()
@@ -6721,8 +6726,12 @@ impl Daemon {
             );
         }
 
+        let had_profile = profile_label.is_some();
         let (extra_env, profile_label, missing_profile) =
             self.respawn_profile(old_id, agent, profile_label);
+        let profile_dir = Self::agent_profile_config_dir(agent, &extra_env);
+        let profile_changed = recorded_profile_dir.as_deref() != profile_dir
+            || (had_profile && recorded_profile_dir.is_none());
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let recorded_cwd = cwd;
         let cwd = Self::respawn_cwd(cwd_override, &recorded_cwd, &project_dir);
@@ -6731,14 +6740,24 @@ impl Daemon {
             RespawnConversation::Fallback(notice) => (Vec::new(), handle, Some(notice)),
             RespawnConversation::Restore if !self.restore_resume() => (Vec::new(), handle, None),
             RespawnConversation::Resume | RespawnConversation::Restore => match &handle {
-                Some(h) if acp.is_none() => match self.resume_check(
-                    old_id,
-                    agent,
-                    h,
-                    &recorded_cwd,
-                    &cwd,
-                    missing_profile.as_deref(),
-                ) {
+                Some(h) if acp.is_none() => match if profile_changed && missing_profile.is_none() {
+                    Err(format!(
+                        "agent profile {:?} configuration changed from {:?} to {:?}, so conversation {} is not resumed on another account",
+                        profile_label.as_deref().unwrap_or("default"),
+                        recorded_profile_dir,
+                        profile_dir,
+                        h.0
+                    ))
+                } else {
+                    self.resume_check(
+                        old_id,
+                        agent,
+                        h,
+                        &recorded_cwd,
+                        &cwd,
+                        missing_profile.as_deref(),
+                    )
+                } {
                     Ok(args) => (args, handle, None),
                     Err(reason) => {
                         tracing::info!("session {old_id} starts fresh: {reason}");
@@ -6752,6 +6771,10 @@ impl Daemon {
                 _ => (Vec::new(), None, None),
             },
         };
+        // A fresh launch in another conversation namespace cannot carry its old handle.
+        let resume_handle = resume_handle.filter(|_| {
+            missing_profile.is_none() && !profile_changed && cwd == Path::new(&recorded_cwd)
+        });
         let spawned = self.spawn_session(SpawnParams {
             id,
             agent,
@@ -6844,9 +6867,15 @@ impl Daemon {
                 "agent profile {label:?} no longer exists, so conversation {conversation} cannot be found"
             ));
         }
-        if !Path::new(recorded_cwd).is_dir() || cwd != Path::new(recorded_cwd) {
+        if !Path::new(recorded_cwd).is_dir() {
             return Err(format!(
                 "folder {recorded_cwd} no longer exists, so conversation {conversation} is not resumed elsewhere"
+            ));
+        }
+        if cwd != Path::new(recorded_cwd) {
+            return Err(format!(
+                "folder changed from {recorded_cwd} to {}, so conversation {conversation} is not resumed elsewhere",
+                cwd.display()
             ));
         }
         let Some(transcript) = transcript else {
@@ -6947,7 +6976,7 @@ impl Daemon {
         }
         let code = exit_code.map_or_else(|| "no code".to_string(), |c| format!("code {c}"));
         let notice = format!(
-            "Started a fresh CLI: claude --resume exited with {code} within {} s",
+            "Started a fresh CLI: the resumed agent exited with {code} within {} s",
             RESUME_EARLY_EXIT.as_secs()
         );
         tracing::info!("session {id}: {notice}");
@@ -6973,6 +7002,15 @@ impl Daemon {
         d: &crate::hook_drop::HookDrop,
     ) {
         use crate::agent_events::AgentEvent;
+        // Serialize handle promotion with Kill/Close so a queued hook cannot
+        // restore a handle after the operator has cleared it.
+        let operator_ended = self.operator_ended.lock().expect("operator_ended lock");
+        if session.removed.load(Ordering::Acquire)
+            || *session.state.lock().expect("state lock") == proto::SessionState::Killed
+            || operator_ended.contains(&id)
+        {
+            return;
+        }
         let turn = matches!(
             AgentEvent::from_provider(provider, &d.event),
             Some(AgentEvent::PromptSubmitted | AgentEvent::TurnEnded)
@@ -7405,7 +7443,11 @@ impl Daemon {
                 );
             }
         }
-        let resumed = extra_args.iter().any(|a| a == "--resume");
+        let resumed = match agent {
+            proto::AgentKind::Claude => extra_args.iter().any(|a| a == "--resume"),
+            proto::AgentKind::Codex => extra_args.first().is_some_and(|a| a == "resume"),
+            _ => false,
+        };
         let preassigned = (agent == proto::AgentKind::Claude
             && acp.is_none()
             && custom_cmd.is_none()
@@ -7584,6 +7626,10 @@ impl Daemon {
         if !hidden {
             self.db
                 .insert_session_with_title_source(&info, Some(title_source.as_str()))?;
+            self.db.set_session_profile_config_dir(
+                id,
+                Self::agent_profile_config_dir(agent, &extra_env),
+            )?;
             self.record_launch_conversation(id, resumed, preassigned, resume_handle);
             self.broadcast_control(&proto::ServerMsg::SessionCreated { info: info.clone() });
         }
@@ -8621,14 +8667,16 @@ impl Daemon {
 
     pub fn kill(&self, id: u32) -> Result<()> {
         let session = self.get(id)?;
-        self.forget_resume_handle(id);
         session.remove_shell_token_file();
         self.operator_ended
             .lock()
             .expect("operator_ended lock")
             .insert(id);
+        self.forget_resume_handle(id);
         self.cancel_delegation(id);
         *session.state.lock().expect("state lock") = proto::SessionState::Killed;
+        self.db
+            .update_session_state(id, proto::SessionState::Killed, None)?;
         let result = session.backend.kill(id, session.pid);
         self.reap_reevaluate();
         result
@@ -8702,16 +8750,17 @@ impl Daemon {
     }
 
     pub fn close(&self, id: u32) -> Result<()> {
-        self.forget_resume_handle(id);
         self.operator_ended
             .lock()
             .expect("operator_ended lock")
             .insert(id);
+        self.forget_resume_handle(id);
         self.cancel_delegation(id);
         let removed = self.sessions.lock().expect("sessions lock").remove(&id);
         if let Some(session) = removed {
             session.remove_shell_token_file();
             session.removed.store(true, Ordering::Release);
+            self.db.mark_closed(id)?;
             self.write_run_state();
             if session.state.lock().expect("state lock").is_live() {
                 let _ = session.backend.kill(id, session.pid);
@@ -16771,6 +16820,92 @@ mod handoff_refusal_tests {
 
     fn spare_fd() -> std::net::TcpListener {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap()
+    }
+
+    fn persistent_ssh_session(daemon: &Daemon, state: &Path, id: u32) -> Arc<Session> {
+        let mut manifest = manifest_entry(id);
+        manifest.agent = proto::AgentKind::Ssh;
+        manifest.project_dir = state.display().to_string();
+        manifest.cwd = manifest.project_dir.clone();
+        let session =
+            Daemon::adopted_session(&manifest, Backend::Ssh(crate::ssh::SshHandle::stub()));
+        daemon.db.insert_session(&session.info).unwrap();
+        daemon
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .insert(id, session.clone());
+        session
+    }
+
+    #[test]
+    fn kill_is_durable_before_the_backend_reports_completion() {
+        let (daemon, state) = test_daemon();
+        let session = persistent_ssh_session(&daemon, state.path(), 7);
+
+        daemon.kill(7).unwrap();
+
+        assert!(!session.backend_exited.load(Ordering::Acquire));
+        assert_eq!(
+            daemon.db.session_final(7).unwrap(),
+            Some((proto::SessionState::Killed, None)),
+            "kill must persist the operator's decision before an asynchronous waiter finishes"
+        );
+        drop(session);
+        drop(daemon);
+
+        let reopened = Db::open(&state.path().join("t.db")).unwrap();
+        assert_eq!(reopened.mark_live_as_interrupted().unwrap(), 0);
+        assert!(reopened.list_interrupted().unwrap().is_empty());
+        assert_eq!(
+            reopened.session_final(7).unwrap(),
+            Some((proto::SessionState::Killed, None)),
+            "crash recovery must not turn an explicitly killed pane into a restore candidate"
+        );
+    }
+
+    #[test]
+    fn close_is_durable_before_the_backend_reports_completion() {
+        let (daemon, state) = test_daemon();
+        let session = persistent_ssh_session(&daemon, state.path(), 7);
+
+        daemon.close(7).unwrap();
+
+        assert!(!session.backend_exited.load(Ordering::Acquire));
+        assert!(
+            daemon.db.session_is_closed(7).unwrap(),
+            "removing a live pane must close its durable row before its asynchronous waiter finishes"
+        );
+        assert!(!daemon.list().iter().any(|info| info.id == 7));
+        drop(session);
+        drop(daemon);
+
+        let reopened = Db::open(&state.path().join("t.db")).unwrap();
+        assert_eq!(reopened.mark_live_as_interrupted().unwrap(), 0);
+        assert!(reopened.list_interrupted().unwrap().is_empty());
+        assert!(
+            reopened.session_is_closed(7).unwrap(),
+            "crash recovery must keep the removed pane closed"
+        );
+    }
+
+    #[test]
+    fn a_late_backend_completion_keeps_a_closed_pane_closed() {
+        let (daemon, state) = test_daemon();
+        let session = persistent_ssh_session(&daemon, state.path(), 7);
+        daemon.close(7).unwrap();
+        assert!(!session.backend_exited.load(Ordering::Acquire));
+
+        daemon.finish_session(7, Some(0));
+
+        assert!(
+            daemon.db.session_is_closed(7).unwrap(),
+            "a late waiter must not overwrite the operator's durable close with exited"
+        );
+        drop(session);
+        drop(daemon);
+        let reopened = Db::open(&state.path().join("t.db")).unwrap();
+        assert!(reopened.session_is_closed(7).unwrap());
     }
 
     #[test]

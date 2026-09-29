@@ -70,7 +70,7 @@ named.
 | **`AgentStatus`** | `Spawning`, `Working`, `Idle`, `NeedsInput`. Set only by `Daemon::set_status`, sourced from hooks or ACP. | `proto::AgentStatus` |
 | **`hooks_seen`** | Per-session flag: at least one hook event has arrived. Stands the spawn-grace watchdog down. | `daemon.rs::Session` |
 | **husk** | A restored session record with no live process. Reaped when idle and childless; its Restart resumes its conversation when it holds a resume handle. | `daemon.rs::dead` |
-| **resume handle** | The root conversation id a Claude pane's hooks reported, kept once that conversation had a turn; the only id Houston passes to `--resume`. Carried to the respawned row; cleared by kill, close and Start fresh. | `sessions.resume_session_id` |
+| **resume handle** | The root conversation ID and transcript path reported by Claude or Codex hooks after a turn. Carried to the respawned row for exact-ID resume; cleared by Kill, Close, Start fresh, a changed folder or a deleted profile. | `sessions.resume_session_id`, `sessions.resume_transcript_path` |
 | **ACP** | Agent Client Protocol: line-delimited JSON-RPC on the PTY, a second lawful status source. In a pane Houston never answers its permission requests. | `acp.rs` |
 | **liveness** | A kernel fact from procfs: does the session's pid have children. Gates the reaper and the close confirmation, never a status. | `has_child_procs` |
 | **ring** | A session's capped byte buffer of everything its PTY ever wrote, minus what has been trimmed off the front. The replay and restore path; not text. | `scrollback.rs` |

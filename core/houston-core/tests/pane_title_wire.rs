@@ -199,7 +199,12 @@ async fn a_restored_prompt_named_pane_accepts_its_clis_title() {
         db_path,
     })
     .unwrap();
-    let replacement = daemon.respawn(1, false, None, None, false).unwrap();
+    let replacement = daemon
+        .list()
+        .into_iter()
+        .filter(|s| s.session_origin == Some(1))
+        .max_by_key(|s| s.id)
+        .expect("the pane restores automatically");
     let d = daemon.clone();
     let id = replacement.id;
     wait_until("the restored pane to accept the CLI title", move || {

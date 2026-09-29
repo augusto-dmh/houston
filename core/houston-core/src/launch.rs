@@ -239,8 +239,9 @@ pub fn auto_approve_args(agent: proto::AgentKind) -> Option<Vec<String>> {
 pub fn resume_args(agent: proto::AgentKind, id: &str) -> Result<Vec<String>> {
     match agent {
         proto::AgentKind::Claude => Ok(vec!["--resume".to_string(), id.to_string()]),
+        proto::AgentKind::Codex => Ok(vec!["resume".to_string(), id.to_string()]),
         other => bail!(
-            "resuming a conversation is not supported for {other:?} (only Claude); \
+            "resuming a conversation is not supported for {other:?} (only Claude and Codex); \
              conversation {id:?} stays unresumed"
         ),
     }
@@ -314,14 +315,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resume_args_accepts_claude_and_refuses_every_other_provider_by_name() {
+    fn resume_args_accepts_claude_and_codex_and_refuses_other_providers_by_name() {
         use proto::AgentKind as K;
         assert_eq!(
             resume_args(K::Claude, "c-1").unwrap(),
             ["--resume".to_string(), "c-1".to_string()]
         );
+        assert_eq!(
+            resume_args(K::Codex, "c-1").unwrap(),
+            ["resume".to_string(), "c-1".to_string()]
+        );
         for kind in [
-            K::Codex,
             K::Antigravity,
             K::Shell,
             K::Custom,

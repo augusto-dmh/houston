@@ -228,6 +228,12 @@ reads as "Codex hooks installed, not confirmed for this pane" rather than a bare
 `Spawning`, since a missing `SessionStart` drop looks the same whether trust is pending,
 the helper is slow, or the file is broken.
 
+Codex 0.159.1 defers `SessionStart` until the first user turn. Resuming a thread already
+loaded in its shared app-server can reuse that thread without another `SessionStart`.
+A restored terminal therefore can wait for input before Houston receives a lifecycle
+event. Restoration does not synthesize an idle event; the next native prompt and stop
+hooks report activity normally.
+
 OpenCode has no shell-hook contract — its plugin bus fires JS callbacks, not a
 shell command with its own stdin — so `houston-notify.js` is the hook contract: it builds
 the JSON `claude_hooks::parse_hook_payload` expects itself and pipes it into the same
