@@ -539,18 +539,10 @@ impl OrchestrationTools {
             ..a
         };
         let spawn_description = String::from(
-            "Start a new agent pane with `prompt` as its first instruction — self-contained, \
-             since the new pane cannot see your conversation. By default it is your child and \
-             consumes a child slot; set `handoff: true` from a top-level pane to create an \
-             independent pane instead. Child spawning obeys the child and depth caps; \
-             handoff does not consume a child slot. \
-             Returns its session id, used by every other pane_* tool. SCALE THE SPAWN TO THE \
-             WORK: do it yourself when the task is smaller than the brief it needs, or when \
-             you cannot go on without the answer this turn; spawn a separable chunk — a \
-             survey, a sweep, a second opinion — or what the user asked for. Size `model` to \
-             that chunk rather than taking the CLI's default, which is usually far more than \
-             a delegated task needs: `sonnet` does searches and mechanical edits. The brief \
-             is three parts — `prompt`, `output_format`, `boundaries`.",
+            "Spawn an agent with a self-contained `prompt`. Returns its session id. Children \
+             obey slot/depth caps; top-level `handoff: true` creates an independent pane using \
+             no child slot. Delegate separable work; size `model` to it (`sonnet` for mechanical \
+             work). Brief: `prompt`, `output_format`, `boundaries`.",
         );
         let mut out = vec![
             ToolSpec {
