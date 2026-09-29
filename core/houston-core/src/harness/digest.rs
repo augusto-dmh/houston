@@ -394,13 +394,17 @@ fn feed_claude_user(
 }
 
 /// What a denied call tried, bounded and with secrets masked, so a review can
-/// name the allow or deny rule it would take.
+/// name the allow or deny rule it would take. Masked before the cap: a cut
+/// can remove the delimiter a secret pattern needs, such as a URL's `@`.
 fn tool_input_summary(input: &Value) -> String {
     let raw = ["command", "file_path", "url", "pattern"]
         .iter()
         .find_map(|k| str_at(input, k).map(str::to_string))
         .unwrap_or_else(|| input.to_string());
-    crate::sanitize::redact_command_secrets(&cap_chars(&raw, DENIED_INPUT_CHARS)).0
+    cap_chars(
+        &crate::sanitize::redact_command_secrets(&raw).0,
+        DENIED_INPUT_CHARS,
+    )
 }
 
 fn feed_claude_assistant(s: &mut Session, o: &Value) {
@@ -1083,6 +1087,17 @@ mod tests {
             tool_input_summary(&json!({ "file_path": "/a/b.md" })),
             "/a/b.md"
         );
+    }
+
+    #[test]
+    fn a_url_password_longer_than_the_cap_is_masked_not_cut() {
+        let password = "p".repeat(300);
+        let v = tool_input_summary(&json!({
+            "command": format!("curl https://alice:{password}@example.invalid/path")
+        }));
+        assert!(!v.contains("pppp"), "no part of the password survives: {v}");
+        assert!(v.contains("[redacted:url_password]"), "{v}");
+        assert!(v.chars().count() <= DENIED_INPUT_CHARS + 1, "{v}");
     }
 
     #[test]
