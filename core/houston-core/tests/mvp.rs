@@ -399,7 +399,7 @@ async fn interrupted_sessions_are_restored_and_respawnable() {
             delegation: None,
             inbox_unread: 0,
             tags: vec![],
-            respawned_from: None,
+            session_origin: None,
         })
         .unwrap();
     }

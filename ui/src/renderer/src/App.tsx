@@ -255,9 +255,9 @@ import {
   setRatio,
   stackWith,
   swapLeaf,
-  syncTree,
   syncWorkspaceGrids,
   respawnedSessions,
+  syncSessionLayout,
   unstack,
   updateBrowserUrl,
   type BrowserNode,
@@ -1593,14 +1593,14 @@ export function App(): React.JSX.Element {
   }, [workspaces, sessions]);
 
   useEffect(() => {
-    if (selectedWs !== "all") return;
+    if (selectedWs !== "all" || conn.kind !== "ready") return;
     const ids = idsKey ? idsKey.split(",").map(Number) : [];
     setLayouts((prev) => {
       const cur = prev.get("all") ?? loadLayout("all");
-      const tree = syncTree(cur.tree, ids, cur.cols);
+      const tree = syncSessionLayout(cur.tree, ids, cur.cols, replacedSessions);
       return new Map(prev).set("all", { ...cur, tree });
     });
-  }, [selectedWs, idsKey]);
+  }, [selectedWs, idsKey, replacedSessions, conn.kind]);
 
   const gridSyncKey = useMemo(() => {
     const perWs = workspaces
@@ -1731,13 +1731,13 @@ export function App(): React.JSX.Element {
       const persisted = loadLayout("all");
       return {
         ...persisted,
-        tree: syncTree(persisted.tree, wsIds, persisted.cols),
+        tree: syncSessionLayout(persisted.tree, wsIds, persisted.cols, replacedSessions),
       };
     }
     const key = gridStorageKey(selectedWs, activeGridId(selectedWs));
     return warmLayouts.get(key) ?? loadLayout(key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layouts, warmLayouts, selectedWs, idsKey, activeGridId]);
+  }, [layouts, warmLayouts, selectedWs, idsKey, activeGridId, replacedSessions]);
   const currentTree = wsState.tree;
   currentTreeRef.current = currentTree;
   const orderedIds = preorderSessions(currentTree);

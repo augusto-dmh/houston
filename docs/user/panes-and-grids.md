@@ -105,6 +105,7 @@ Restore budget caps how many sessions Houston brings back automatically when it 
 again after a clean shutdown, rather than restoring every session that was open.
 
 A restored session, or one you restart from its pane, starts a fresh agent in the same
-cell it left: the same grid, split and stack, whichever grid is active. It runs on the
+cell it left: the same grid, split and stack, whichever grid is active. This also applies
+to repeated restarts while the application is closed and to All workspaces. It runs on the
 same agent profile. If that profile has since been deleted, it runs on the default
 account and the pane no longer shows the profile's name.

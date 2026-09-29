@@ -1277,7 +1277,7 @@ pub struct SessionInfo {
     pub tags: Vec<u32>,
     #[serde(default)]
     #[cfg_attr(feature = "ts-gen", ts(optional = nullable, type = "number | null"))]
-    pub respawned_from: Option<u32>,
+    pub session_origin: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

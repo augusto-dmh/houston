@@ -1648,7 +1648,7 @@ struct SpawnParams {
     wrap: Option<Vec<String>>,
     acp: Option<String>,
     profile_label: Option<String>,
-    respawned_from: Option<u32>,
+    session_origin: Option<u32>,
 }
 
 type ProfileSpawnEnv = (Option<(String, String)>, Option<String>);
@@ -3376,7 +3376,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: m.tags.clone(),
-            respawned_from: None,
+            session_origin: None,
         };
         let vt = adopted_emulator(m);
         Arc::new(Session {
@@ -6052,6 +6052,12 @@ impl Daemon {
             .collect();
         out.extend(self.dead.lock().expect("dead lock").values().cloned());
         for info in out.iter_mut() {
+            if info.session_origin.is_none() {
+                info.session_origin = Some(self.db.session_origin(info.id).unwrap_or_else(|e| {
+                    tracing::warn!("reading session origin for {}: {e}", info.id);
+                    info.id
+                }));
+            }
             if !info.hidden {
                 let (live, waiting) = self.child_counts_of(info.id);
                 info.live_children = live;
@@ -6294,7 +6300,7 @@ impl Daemon {
             acp: p.acp,
             profile_label,
             tags: Vec::new(),
-            respawned_from: None,
+            session_origin: None,
         })?;
         self.record_approval_mode(info.id, approval);
         Ok(info)
@@ -6685,7 +6691,7 @@ impl Daemon {
             acp,
             profile_label,
             tags: old_tags,
-            respawned_from: Some(old_id),
+            session_origin: Some(self.db.session_origin(old_id)?),
         })?;
 
         if was_dead {
@@ -6958,7 +6964,7 @@ impl Daemon {
             wrap,
             acp,
             profile_label,
-            respawned_from,
+            session_origin,
         } = p;
         let pty = native_pty_system();
         let pair = pty
@@ -7196,7 +7202,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: p_tags.clone(),
-            respawned_from,
+            session_origin: Some(session_origin.unwrap_or(id)),
         };
 
         let session = Arc::new(Session {
@@ -7558,7 +7564,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: Vec::new(),
-            respawned_from: None,
+            session_origin: None,
         };
         let session = Arc::new(Session {
             info: info.clone(),
@@ -8870,7 +8876,7 @@ impl Daemon {
             acp: None,
             profile_label: None,
             tags: Vec::new(),
-            respawned_from: None,
+            session_origin: None,
         });
         if let Err(e) = spawned {
             self.handoff_jobs
@@ -12317,7 +12323,7 @@ impl Daemon {
             acp: None,
             profile_label,
             tags: Vec::new(),
-            respawned_from: None,
+            session_origin: None,
         });
         let info = spawned?;
         self.record_approval_mode(sid, requested_mode);

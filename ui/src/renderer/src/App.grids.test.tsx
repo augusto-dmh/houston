@@ -71,6 +71,53 @@ describe('grids (step 05, driven from the rail)', () => {
     expect(rows[0].getAttribute('data-selected')).toBe('true')
   })
 
+  it('keeps the saved All layout until hello and restores its session origins when opened', async () => {
+    const tree = {
+      kind: 'split',
+      dir: 'row',
+      weights: [70, 30],
+      children: [
+        { kind: 'leaf', session: 2, id: 'pane-two' },
+        { kind: 'leaf', session: 1, id: 'pane-one' }
+      ]
+    }
+    localStorage.setItem('tr-layout:all', JSON.stringify({ tree, cols: 2 }))
+    harness = await renderReadyApp({
+      sessions: [
+        { ...makeSession({ id: 11 }), session_origin: 1 },
+        { ...makeSession({ id: 12 }), session_origin: 2 }
+      ],
+      workspaces: [makeWorkspace()]
+    })
+    expect(JSON.parse(localStorage.getItem('tr-layout:all') ?? 'null').tree).toEqual(tree)
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true })
+      )
+      await Promise.resolve()
+    })
+    const all = [...harness.container.querySelectorAll('[data-testid="command-palette-row"]')]
+      .find((row) => row.textContent?.includes('All workspaces'))
+    expect(all).toBeDefined()
+    await act(async () => {
+      all!.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+      await Promise.resolve()
+    })
+    await act(async () => {
+      all!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      await Promise.resolve()
+    })
+
+    expect(JSON.parse(localStorage.getItem('tr-layout:all') ?? 'null').tree).toEqual({
+      ...tree,
+      children: [
+        { kind: 'leaf', session: 12, id: 'pane-two', session_origin: 2 },
+        { kind: 'leaf', session: 11, id: 'pane-one', session_origin: 1 }
+      ]
+    })
+  })
+
   it('adding a grid, then switching, never duplicates a session across grids', async () => {
     await boot([1, 2])
 

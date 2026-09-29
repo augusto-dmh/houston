@@ -82,7 +82,7 @@ fn stored_session(id: u32, ws: &Path, title: &str) -> proto::SessionInfo {
         delegation: None,
         inbox_unread: 0,
         tags: vec![],
-        respawned_from: None,
+        session_origin: None,
     }
 }
 

@@ -1255,6 +1255,12 @@ impl Db {
         add_column_if_missing(&conn, "sessions", "spawned_by", "spawned_by INTEGER")?;
         add_column_if_missing(&conn, "sessions", "acp", "acp TEXT")?;
         add_column_if_missing(&conn, "sessions", "profile_label", "profile_label TEXT")?;
+        add_column_if_missing(
+            &conn,
+            "sessions",
+            "session_origin",
+            "session_origin INTEGER",
+        )?;
         add_column_if_missing(&conn, "sessions", "approval_mode", "approval_mode TEXT")?;
         add_column_if_missing(&conn, "sessions", "transcript_path", "transcript_path TEXT")?;
         add_column_if_missing(
@@ -1720,7 +1726,7 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT id, agent, project_dir, cwd, title, codename, title_source, detected_agent, ssh_host,
                     (SELECT sa.id FROM swarm_agents sa WHERE sa.session_id = sessions.id),
-                    spawned_by, acp, profile_label, tags
+                    spawned_by, acp, profile_label, tags, COALESCE(session_origin, id)
              FROM sessions
              WHERE state = 'interrupted' AND agent != 'custom'
                    AND NOT EXISTS (SELECT 1 FROM swarm_agents sa WHERE sa.session_id = sessions.id)
@@ -1743,13 +1749,14 @@ impl Db {
                     r.get::<_, Option<String>>(11)?,
                     r.get::<_, Option<String>>(12)?,
                     r.get::<_, String>(13)?,
+                    r.get::<_, u32>(14)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(stmt);
         let mut used: std::collections::HashSet<String> = rows
             .iter()
-            .filter_map(|(_, _, _, _, title, codename, _, _, _, _, _, _, _, _)| {
+            .filter_map(|(_, _, _, _, title, codename, _, _, _, _, _, _, _, _, _)| {
                 if codename.is_empty() {
                     (!title.is_empty()).then(|| title.clone())
                 } else {
@@ -1773,6 +1780,7 @@ impl Db {
             acp,
             profile_label,
             tags_json,
+            session_origin,
         ) in rows
         {
             if codename.is_empty() && !title.is_empty() {
@@ -1821,7 +1829,7 @@ impl Db {
                             );
                             Vec::new()
                         }),
-                    respawned_from: None,
+                    session_origin: Some(session_origin),
                 }),
                 Err(_) => tracing::warn!(
                     "session {id} has unknown agent {agent:?} in the db; not restoring it"
@@ -1838,6 +1846,15 @@ impl Db {
             rusqlite::params![id],
         )?;
         Ok(())
+    }
+
+    pub fn session_origin(&self, id: u32) -> Result<u32> {
+        let conn = self.conn.lock().expect("db lock");
+        Ok(conn.query_row(
+            "SELECT COALESCE(session_origin, id) FROM sessions WHERE id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn session_is_closed(&self, id: u32) -> Result<bool> {
@@ -1870,8 +1887,8 @@ impl Db {
         let conn = self.conn.lock().expect("db lock");
         conn.execute(
             "INSERT INTO sessions (id, agent, project_dir, cwd, state, title, codename, title_source,
-                                   ssh_host, spawned_by, acp, profile_label, tags, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, unixepoch())",
+                                   ssh_host, spawned_by, acp, profile_label, tags, session_origin, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, unixepoch())",
             rusqlite::params![
                 info.id,
                 serde_json::to_string(&info.agent)?.trim_matches('"'),
@@ -1886,6 +1903,7 @@ impl Db {
                 info.acp,
                 info.profile_label,
                 serde_json::to_string(&info.tags)?,
+                info.session_origin.unwrap_or(info.id),
             ],
         )?;
         Ok(())
@@ -4666,7 +4684,7 @@ mod tests {
             delegation: None,
             inbox_unread: 0,
             tags: vec![],
-            respawned_from: None,
+            session_origin: None,
         }
     }
 
@@ -4684,6 +4702,31 @@ mod tests {
 
         assert_eq!(db.mark_live_as_interrupted().unwrap(), 2);
         assert_eq!(db.next_session_id().unwrap(), 4);
+    }
+
+    #[test]
+    fn session_origin_persists_and_legacy_rows_use_their_own_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.db");
+        {
+            let db = Db::open(&path).unwrap();
+            db.insert_session(&info(1, proto::SessionState::Running))
+                .unwrap();
+            let mut replacement = info(2, proto::SessionState::Running);
+            replacement.session_origin = Some(1);
+            db.insert_session(&replacement).unwrap();
+            db.conn
+                .lock()
+                .unwrap()
+                .execute("UPDATE sessions SET session_origin = NULL WHERE id = 1", [])
+                .unwrap();
+            db.mark_live_as_interrupted().unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.session_origin(1).unwrap(), 1);
+        assert_eq!(db.session_origin(2).unwrap(), 1);
+        let sessions = db.list_interrupted().unwrap();
+        assert!(sessions.iter().all(|s| s.session_origin == Some(1)));
     }
 
     #[test]
