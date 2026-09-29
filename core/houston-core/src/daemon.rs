@@ -6622,6 +6622,7 @@ impl Daemon {
             );
         }
 
+        let (extra_env, profile_label) = self.respawn_profile(old_id, agent, profile_label);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let cwd = Self::respawn_cwd(cwd_override, &cwd, &project_dir);
         let spawned = self.spawn_session(SpawnParams {
@@ -6641,7 +6642,7 @@ impl Daemon {
             swarm_agent: None,
             spawned_by,
             extra_args: Vec::new(),
-            extra_env: Vec::new(),
+            extra_env,
             wrap: None,
             acp,
             profile_label,
@@ -6671,6 +6672,27 @@ impl Daemon {
             self.broadcast_live_children(parent);
         }
         Ok(spawned)
+    }
+
+    /// The profile environment a respawned pane runs with. A label whose profile
+    /// is gone falls back to the default account and drops the label with it.
+    fn respawn_profile(
+        &self,
+        old_id: u32,
+        agent: proto::AgentKind,
+        label: Option<String>,
+    ) -> ProfileSpawnEnvList {
+        let Some(label) = label else {
+            return (Vec::new(), None);
+        };
+        self.resolve_named_profile(agent, &label)
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "respawning session {old_id} on the default account without its profile \
+                     label {label:?}: {e:#}"
+                );
+                (Vec::new(), None)
+            })
     }
 
     fn flush_shell_token_redactor(self: &Arc<Self>, id: u32, session: &Arc<Session>) {
