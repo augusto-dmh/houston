@@ -422,8 +422,8 @@ SessionInfo        id, agent: AgentKind, project_dir, cwd (the actual run dir), 
                    addressed to this pane),
                    tags (v100: tag ids in application order; resolved against the tag registry —
                    ids, never names, so a rename/recolor needs no session rewrite),
-                   respawned_from? (v118: the session this one replaced through `session_respawn` or
-                   boot restore; a client moves the old id's pane to this id. Never persisted),
+                   session_origin? (v118: original session id persisted across `session_respawn` and
+                   boot restore; clients retain the pane across missed replacements),
                    resumable (v119: the session holds a resume handle, so a Restart without `fresh`
                    resumes its conversation), resume_notice? (v119: why this session started fresh
                    instead of resuming; held in memory for the session's life)
@@ -757,11 +757,13 @@ one of those.
   richer `ManageDaemonHandoffResult` landed under this rule at version 1.
   `ManageRequest::candidate_bin` landed under it too: it is optional, every
   shipped caller omits it, and its absence is exactly the old behaviour.
-  `daemon_shutdown_if_idle` is likewise additive: only the updater sends it,
-  and older daemons refuse the unknown verb instead of changing an existing
-  caller's response shape.
+  `daemon_shutdown_if_idle` and `daemon_shutdown_if_sessions` are likewise
+  additive: only the updater sends them, and older daemons refuse the unknown
+  verb instead of changing an existing caller's response shape.
+  `ManageRequest::expected_sessions` is optional and absent for every other
+  verb.
 - **Request**: `POST /manage` with
-  `{"manage_version":1,"verb":"daemon_status"|"daemon_shutdown"|"daemon_shutdown_if_idle"|"daemon_handoff","candidate_bin"?:"/absolute/path"}`.
+  `{"manage_version":1,"verb":"daemon_status"|"daemon_shutdown"|"daemon_shutdown_if_idle"|"daemon_shutdown_if_sessions"|"daemon_handoff","candidate_bin"?:"/absolute/path","expected_sessions"?:[1,2]}`.
   This exact shape — and every response shape below — is pinned by the
   renderer's own hand-written client and its tests
   (`ui/src/renderer/src/houston/manage.ts`, `manage.test.ts`); it is
@@ -780,6 +782,10 @@ one of those.
   keeps the old behaviour — the daemon resolves its own executable, which is
   what `scripts/dev.sh --fresh` sends. Any other verb carrying `candidate_bin`
   gets `400` naming the field.
+  `expected_sessions` is meaningful only with `daemon_shutdown_if_sessions`
+  and required there: the live session ids the user confirmed (an empty
+  array confirms that none are live). Any other verb carrying it, or that
+  verb without it, gets `400` naming the field.
   - `daemon_status` → `200` with
     ```json
     {
@@ -808,12 +814,18 @@ one of those.
     nothing marked clean. Both land on `200`: the daemon answered, it just
     declined — the client discriminates by the presence of `error`, never
     by HTTP status.
-  - `daemon_shutdown_if_idle` (Windows updater only) → closes the mutation
+  - `daemon_shutdown_if_idle` (updater, Keep path on Windows) → closes the mutation
     gate, then stops the daemon only when it owns no live sessions. If any
     session is live it returns `200 {"ok":false,"error":"…",
     "unterminated":[…]}` naming the count and ids, kills nothing, and keeps
     the daemon running. This closes the race between the updater's initial
     session check and the installer replacing the running sidecar.
+  - `daemon_shutdown_if_sessions` (updater, "stop everything") → closes the
+    mutation gate, then behaves as `daemon_shutdown` only when the sorted
+    live session ids equal the sorted `expected_sessions`. On any difference
+    it returns `200 {"ok":false,"error":"…","unterminated":[…]}` naming both
+    sets, kills nothing and keeps the daemon running, so a session the user
+    never saw in the update modal is never stopped.
   - `daemon_handoff` (Linux only) → asks the running daemon to hand its
     live sessions to a fresh generation in place (`adoption.rs`). `200
     {"accepted":true,"reason":null,"generation":2,"sessions_transferred":3}`
@@ -869,7 +881,7 @@ Only the current window; older bumps live in git history.
 | Version | What changed |
 |---|---|
 | 119 | **A restored or restarted Claude pane resumes its conversation.** `SessionInfo` gains `resumable` and `resume_notice?`; `session_respawn` gains `fresh?`; new `restore_resume_set` (reply: `host_info` bcast, which gains `restore_resume`) and `session_resumable` bcast. Boot restore and `session_respawn` relaunch a Claude session with `--resume <id>` when it holds a resume handle that passes validation, and start fresh with a one-line `resume_notice` otherwise |
-| 118 | **A respawned session names the session it replaced.** `SessionInfo` gains `respawned_from`, set on the session that `session_respawn` or boot restore started in place of another, so a client can keep the old pane, in any grid or stack, for the new id instead of dropping it and appending the new one. No message is added or removed |
+| 118 | **A restarted session keeps its original pane.** `SessionInfo` gains `session_origin`, the original session id persisted across successive restarts and boot restores. Clients retain the pane in any grid or stack even when they missed intermediate replacements. No message is added or removed |
 | 117 | **Harness review results have their own view.** New `harness_state`, `harness_routine_create`, `harness_report` and `harness_decide` client messages and `harness_state`, `harness_report` and `harness_changed` replies, with `HarnessReview`, `HarnessReviewStatus`, `HarnessFinding` and `HarnessFindingState`. A review run publishes with the `harness_publish` MCP tool or `hs-harness publish`, offered only to its own pane, instead of `pane_submit` to the operator's inbox; the daemon stores the run, its findings and the operator's decisions per workspace. The state includes native Claude and Codex model options from the shared local catalog, which describes metadata rather than account availability. No existing message changes |
 | 116 | **The notification feed is removed.** Gone from the wire: the server's `agent_notice` broadcast and the `AgentNoticeKind` enum. `agent_status` keeps carrying every lifecycle change (working, idle, needs-input) and the orchestration inbox messages (`inbox_list`/`inbox_ack`/`inbox_resolve`/`inbox_deliver_now`, `inbox_rows`, `inbox_changed`) are unchanged; there is simply no separate attention feed for a client notification center |
 | 115 | **A workspace without git is not a failure.** `git_status`'s reply gains `not_a_repo`. A plain existing directory with no Git metadata replies `not_a_repo: true` with empty files and null branch fields instead of an `error`, so the renderer shows its not-a-repo state without an app-wide error toast. A missing directory or any Git probe failure remains an `error`; no other message changes |

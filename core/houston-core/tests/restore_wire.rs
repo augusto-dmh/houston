@@ -41,7 +41,7 @@ fn seed(state_dir: &std::path::Path, dirs: &[&std::path::Path], clean: bool) {
             delegation: None,
             inbox_unread: 0,
             tags: vec![],
-            respawned_from: None,
+            session_origin: None,
             resumable: false,
             resume_notice: None,
         })
@@ -58,6 +58,7 @@ fn seed_one(
     dir: &std::path::Path,
     agent: proto::AgentKind,
     spawned_by: Option<u32>,
+    session_origin: Option<u32>,
 ) {
     let db = Db::open(&state_dir.join("test.db")).unwrap();
     db.insert_session(&proto::SessionInfo {
@@ -83,7 +84,7 @@ fn seed_one(
         delegation: None,
         inbox_unread: 0,
         tags: vec![],
-        respawned_from: None,
+        session_origin,
         resumable: false,
         resume_notice: None,
     })
@@ -195,7 +196,7 @@ fn invalid_cwd_is_deferred_not_respawned() {
         delegation: None,
         inbox_unread: 0,
         tags: vec![],
-        respawned_from: None,
+        session_origin: None,
         resumable: false,
         resume_notice: None,
     })
@@ -365,7 +366,7 @@ fn no_flags_set_runs_normal_restore_policy() {
         delegation: None,
         inbox_unread: 0,
         tags: vec![],
-        respawned_from: None,
+        session_origin: None,
         resumable: false,
         resume_notice: None,
     })
@@ -463,7 +464,14 @@ fn an_agent_husk_comes_back_live_and_never_as_a_corpse() {
 
     let state = tempfile::tempdir().unwrap();
     let proj = tempfile::tempdir().unwrap();
-    seed_one(state.path(), 1, proj.path(), proto::AgentKind::Claude, None);
+    seed_one(
+        state.path(),
+        1,
+        proj.path(),
+        proto::AgentKind::Claude,
+        None,
+        None,
+    );
     std::fs::write(state.path().join("clean-shutdown"), b"").unwrap();
 
     let (sessions, recovery) = boot_and_list(state.path());
@@ -499,13 +507,13 @@ fn a_restored_session_names_the_husk_it_replaced() {
     let (sessions, _) = boot_and_list(state.path());
     let restored = sessions
         .iter()
-        .find(|s| s.title == "Husk-7")
+        .find(|s| s.title == "Husk-8")
         .expect("the restored pane is listed");
-    assert_ne!(restored.id, 7, "respawn mints a new id: {restored:?}");
+    assert_ne!(restored.id, 8, "respawn mints a new id: {restored:?}");
     assert_eq!(
-        restored.respawned_from,
+        restored.session_origin,
         Some(7),
-        "a client needs the retired id to keep the pane's grid slot: {restored:?}"
+        "a client needs the original id to keep the pane's grid slot: {restored:?}"
     );
 }
 
@@ -518,13 +526,21 @@ fn boot_closes_an_orchestrated_child_rather_than_leaving_a_husk() {
 
     let state = tempfile::tempdir().unwrap();
     let proj = tempfile::tempdir().unwrap();
-    seed_one(state.path(), 1, proj.path(), proto::AgentKind::Claude, None);
+    seed_one(
+        state.path(),
+        1,
+        proj.path(),
+        proto::AgentKind::Claude,
+        None,
+        None,
+    );
     seed_one(
         state.path(),
         2,
         proj.path(),
         proto::AgentKind::Claude,
         Some(1),
+        None,
     );
     std::fs::write(state.path().join("clean-shutdown"), b"").unwrap();
 

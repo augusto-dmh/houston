@@ -192,7 +192,7 @@ fn claude_pane(daemon: &Arc<Daemon>, dir: &Path, profile: Option<u32>) -> proto:
 fn restored_from(sessions: &[proto::SessionInfo], old: u32) -> &proto::SessionInfo {
     sessions
         .iter()
-        .find(|s| s.respawned_from == Some(old))
+        .find(|s| s.session_origin == Some(old))
         .unwrap_or_else(|| panic!("session {old} was not restored: {sessions:?}"))
 }
 
@@ -362,7 +362,7 @@ fn seed_claude(env: &Env, id: u32, dir: &Path, cwd: &Path, handle: Option<(&str,
         delegation: None,
         inbox_unread: 0,
         tags: vec![],
-        respawned_from: None,
+        session_origin: None,
         resumable: false,
         resume_notice: None,
     })
@@ -754,7 +754,7 @@ async fn a_resume_that_exits_early_relaunches_fresh_once() {
         Some("conv-rejected")
     );
     wait_for_session(&daemon, "the fresh relaunch", |s| {
-        s.respawned_from == Some(resumed.id)
+        s.session_origin == Some(resumed.id)
     })
     .await;
     let fallback = restored_from(&daemon.list(), resumed.id).clone();
@@ -776,7 +776,7 @@ async fn a_resume_that_exits_early_relaunches_fresh_once() {
         !daemon
             .list()
             .iter()
-            .any(|s| s.respawned_from == Some(fallback.id)),
+            .any(|s| s.session_origin == Some(fallback.id)),
         "one fallback, never a loop"
     );
 }
@@ -802,7 +802,7 @@ async fn a_resumed_cli_that_exits_cleanly_is_not_relaunched() {
         !daemon
             .list()
             .iter()
-            .any(|s| s.respawned_from == Some(resumed.id)),
+            .any(|s| s.session_origin == Some(resumed.id)),
         "a clean exit is the user's"
     );
 }
