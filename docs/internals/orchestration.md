@@ -56,6 +56,8 @@ spelling, or a verb that is CLI-only).
 | `pane_submit` | `mcp_orchestration.rs` | `hs-pane submit` | worker→parent result handoff, with an optional summary and artifact paths; wakes the parent |
 | — | — | `hs-pane keys` | press a small set of keys in a pane (the CLI-only spelling of `pane_send_keys`) |
 | `pane_send_keys` | `mcp_orchestration.rs` | — | press a small set of keys in a pane (see the tool's own description for the list) |
+| `harness_publish` | `mcp_harness.rs` | `hs-harness publish` | not a pane verb: a harness review run hands its `report.md` and `findings.json` to the Harness view. Offered only to that run's pane while it is in flight, whatever the orchestration setting |
+| — | — | `hs-harness` | the extractor a harness review run calls (`inventory`, `digest`, `publish`); its wrapper sits beside `hs-pane`, and `digest` refuses outside a routine run (carve-out #6 in `invariants.md`) |
 | `browser_current_page` | `src-tauri/src/browser/mcp_tools.rs` | — | URL, title, favicon, loading state |
 | `browser_capture` | `mcp_tools.rs` | — | PNG screenshot of the browser pane |
 | `browser_navigate` | `mcp_tools.rs` | — | load an http(s) URL, opening a pane at it when the workspace has none |
@@ -80,7 +82,9 @@ row, so no handback, cleanup or live-children guard on the caller's close. It by
 child and depth caps, so it is refused from any pane that has a parent, and with `reusable`
 or `output_format`, which only mean something to a parent. Orchestration must still be on,
 and the approval ceiling still applies.
-`pane_submit` takes `body` and optional `summary`, `artifacts`, `request_id`.
+`pane_submit` takes `body` and optional `summary`, `artifacts`, `request_id`. A pane nobody
+spawned has nobody to submit to and is refused; a harness review run's refusal names
+`harness_publish` instead.
 
 `orchestrate.rs` is the pure layer under all of it — no DB, no PTY: scope and cap
 verdicts, wait and stall decisions, inbox composition and the sub-agent and permission
