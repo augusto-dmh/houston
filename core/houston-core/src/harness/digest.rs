@@ -564,6 +564,50 @@ pub struct Tally {
     pub available_from_ms: Option<i64>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Line {
+    Read,
+    Oversized,
+    End,
+}
+
+/// Reads one line into `buf`, holding at most `max + 1` bytes of it: past
+/// `max` the rest of the line is consumed and discarded, so one huge line
+/// never costs more memory than the cap.
+fn read_bounded_line(
+    reader: &mut impl BufRead,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<Line> {
+    buf.clear();
+    let mut seen = 0usize;
+    loop {
+        let chunk = reader.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(match seen {
+                0 => Line::End,
+                _ if seen > max => Line::Oversized,
+                _ => Line::Read,
+            });
+        }
+        let (take, done) = match chunk.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        let room = (max + 1).saturating_sub(buf.len());
+        buf.extend_from_slice(&chunk[..take.min(room)]);
+        seen += take;
+        reader.consume(take);
+        if done {
+            return Ok(if seen > max {
+                Line::Oversized
+            } else {
+                Line::Read
+            });
+        }
+    }
+}
+
 fn for_each_line(path: &Path, tally: &mut Tally, mut f: impl FnMut(&Value) -> bool) -> bool {
     let Ok(file) = std::fs::File::open(path) else {
         tally.unreadable_files += 1;
@@ -572,18 +616,17 @@ fn for_each_line(path: &Path, tally: &mut Tally, mut f: impl FnMut(&Value) -> bo
     let mut reader = BufReader::with_capacity(64 * 1024, file);
     let mut buf = Vec::with_capacity(8 * 1024);
     loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf) {
-            Ok(0) => return true,
-            Ok(_) => {}
+        match read_bounded_line(&mut reader, &mut buf, LINE_MAX) {
+            Ok(Line::End) => return true,
+            Ok(Line::Read) => {}
+            Ok(Line::Oversized) => {
+                tally.oversized_lines += 1;
+                continue;
+            }
             Err(_) => {
                 tally.unreadable_files += 1;
                 return false;
             }
-        }
-        if buf.len() > LINE_MAX {
-            tally.oversized_lines += 1;
-            continue;
         }
         let Ok(v) = serde_json::from_slice::<Value>(&buf) else {
             continue;
@@ -1182,6 +1225,30 @@ mod tests {
         assert!(err.contains("3 sessions"), "{err}");
         assert!(!target.exists());
         assert!(!out.path().join("digest.jsonl.tmp").exists());
+    }
+
+    #[test]
+    fn an_oversized_line_is_discarded_within_the_cap_and_reading_resumes() {
+        let max = 64;
+        let body = format!("short\n{}\nnext\nlast", "z".repeat(10_000));
+        let mut reader = BufReader::with_capacity(16, body.as_bytes());
+        let mut buf = Vec::new();
+        let mut peak = 0;
+        let mut lines = Vec::new();
+        loop {
+            let line = read_bounded_line(&mut reader, &mut buf, max).unwrap();
+            peak = peak.max(buf.capacity());
+            match line {
+                Line::End => break,
+                Line::Oversized => lines.push("<oversized>".to_string()),
+                Line::Read => lines.push(String::from_utf8(buf.clone()).unwrap()),
+            }
+        }
+        assert_eq!(lines, ["short\n", "<oversized>", "next\n", "last"]);
+        assert!(
+            peak <= 2 * (max + 1),
+            "the buffer grew to {peak} bytes for a {max} byte cap"
+        );
     }
 
     #[test]
