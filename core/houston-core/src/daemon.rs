@@ -7368,11 +7368,11 @@ impl Daemon {
             && !hidden
             && !resumed)
             .then(|| uuid::Uuid::new_v4().to_string());
-        if let Some(conversation) = &preassigned {
-            cmd.args(["--session-id", conversation]);
-        }
         for a in &extra_args {
             cmd.arg(a);
+        }
+        if let Some(conversation) = &preassigned {
+            cmd.args(["--session-id", conversation]);
         }
         let mcp = self.mint_mcp_launch(id, agent, &project_dir);
         for a in &mcp.args {
