@@ -45,11 +45,15 @@ import {
   stackWith,
   swapLeaf,
   syncTree,
+  syncWorkspaceGrids,
+  respawnedSessions,
+  syncSessionLayout,
   unstack,
   updateBrowserUrl,
   type BrowserNode,
   type EditorNode,
   type LayoutNode,
+  type LayoutState,
   type LeafNode,
   type SplitNode
 } from './tree'
@@ -242,6 +246,105 @@ describe('syncTree', () => {
     const tree = row(leaf(1), browser('b1'))
     const next = syncTree(tree, [1], 2)!
     expect(preorderLeaves(next)).toEqual([1, 'b1'])
+  })
+})
+
+describe('syncWorkspaceGrids across a respawn', () => {
+  const ws = '/ws/respawn'
+  const grids = [
+    { id: 'g-active', name: 'Active' },
+    { id: 'g-other', name: 'Other' }
+  ]
+  const layouts = (active: LayoutNode, other: LayoutNode): Map<string, LayoutState> =>
+    new Map([
+      [gridStorageKey(ws, 'g-active'), { tree: active, cols: 2 }],
+      [gridStorageKey(ws, 'g-other'), { tree: other, cols: 2 }]
+    ])
+  const synced = (
+    current: Map<string, LayoutState>,
+    alive: number[],
+    replaced: Map<number, number>
+  ) => {
+    const out = syncWorkspaceGrids(ws, grids, 'g-active', alive, current, replaced)
+    return {
+      active: out.get(gridStorageKey(ws, 'g-active'))!.tree,
+      other: out.get(gridStorageKey(ws, 'g-other'))!.tree
+    }
+  }
+
+  it('puts each replacement in the pane its old session held, in every grid and stack', () => {
+    const active: SplitNode = { ...row(leaf(1), leaf(2), leaf(3)), weights: [50, 30, 20] }
+    const other = row(stackPane([leaf(4), leaf(5)], 1, 'st'), leaf(6))
+    const replaced = respawnedSessions([
+      { id: 1 },
+      { id: 11, session_origin: 2 },
+      { id: 3 },
+      { id: 14, session_origin: 4 },
+      { id: 5 },
+      { id: 6 }
+    ])
+
+    const out = synced(layouts(active, other), [1, 3, 5, 6, 11, 14], replaced)
+
+    expect(preorderSessions(out.active)).toEqual([1, 11, 3])
+    expect(sessionPaneIds(out.active).get(11)).toBe('p2')
+    expect((out.active as SplitNode).weights).toEqual([50, 30, 20])
+    expect(preorderSessions(out.other)).toEqual([14, 5, 6])
+    expect(findStackContaining(out.other!, 14)?.id).toBe('st')
+    expect(sessionPaneIds(out.other).get(14)).toBe('p4')
+  })
+
+  it('never shows the retired session while its replacement is already listed', () => {
+    const out = synced(
+      layouts(row(leaf(1), leaf(2)), leaf(6)),
+      [1, 2, 6, 11],
+      respawnedSessions([{ id: 1 }, { id: 6 }, { id: 11, session_origin: 2 }])
+    )
+    expect(preorderSessions(out.active)).toEqual([1, 11])
+    expect(preorderSessions(out.other)).toEqual([6])
+  })
+
+  it('keeps an inactive stacked pane after replacements the client never observed', () => {
+    const current = layouts(leaf(1), row(stackPane([leaf(2), leaf(3)], 1, 'st'), leaf(4)))
+    const out = synced(current, [1, 3, 4, 12], respawnedSessions([
+      { id: 1 }, { id: 3 }, { id: 4 }, { id: 12, session_origin: 2 }
+    ]))
+    expect(preorderSessions(out.active)).toEqual([1])
+    expect(preorderSessions(out.other)).toEqual([12, 3, 4])
+    expect(sessionPaneIds(out.other).get(12)).toBe('p2')
+    expect(findStackContaining(out.other!, 12)?.activeIndex).toBe(1)
+  })
+
+  it('removes an intermediate retired row when the latest replacement is listed', () => {
+    const current = layouts(leaf(1), { ...leaf(11), id: 'p2', session_origin: 2 })
+    const out = synced(current, [1, 11, 13], respawnedSessions([
+      { id: 13, session_origin: 2 }, { id: 1 }, { id: 11, session_origin: 2 }
+    ]))
+    expect(preorderSessions(out.active)).toEqual([1])
+    expect(preorderSessions(out.other)).toEqual([13])
+    expect(sessionPaneIds(out.other).get(13)).toBe('p2')
+  })
+
+  it('keeps origins in the All layout after changing density', () => {
+    const replaced = respawnedSessions([{ id: 1 }, { id: 11, session_origin: 2 }])
+    const first = syncSessionLayout(row(leaf(2), leaf(1)), [1, 11], 2, replaced)
+    saveLayout('all', { tree: regrid(first, [11, 1], 1), cols: 1 })
+    const loaded = loadLayout('all')
+    const next = syncSessionLayout(loaded.tree, [1, 13], loaded.cols,
+      respawnedSessions([{ id: 1 }, { id: 13, session_origin: 2 }]))
+    expect(preorderSessions(next)).toEqual([13, 1])
+    expect(sessionPaneIds(next).get(13)).toBe('p2')
+  })
+
+  it('keeps the saved origin after observing an intermediate replacement', () => {
+    const first = syncWorkspaceGrids(ws, grids, 'g-active', [1, 11],
+      layouts(leaf(1), leaf(2)), respawnedSessions([{ id: 1 }, { id: 11, session_origin: 2 }]))
+    for (const [key, state] of first) saveLayout(key, state)
+    const second = syncWorkspaceGrids(ws, grids, 'g-active', [1, 13], new Map(),
+      respawnedSessions([{ id: 1 }, { id: 13, session_origin: 2 }]))
+    const other = second.get(gridStorageKey(ws, 'g-other'))!.tree
+    expect(preorderSessions(other)).toEqual([13])
+    expect(sessionPaneIds(other).get(13)).toBe('p2')
   })
 })
 
@@ -461,7 +564,7 @@ describe('durable pane identity (07-bridge R1, 2026-08-19)', () => {
     expect(sessionPaneIds(synced).get(1)).toBe(kept.get(1))
   })
 
-  it('reviveLeaf moves a resumed session into the pane it was resumed from', () => {
+  it('reviveLeaf moves a respawned session into the pane it was respawned from', () => {
     const before: SplitNode = { ...row(mintLeaf(1), mintLeaf(2)), weights: [70, 30] }
     const pane = sessionPaneIds(before).get(1)!
     const after = reviveLeaf(before, pane, 9) as SplitNode

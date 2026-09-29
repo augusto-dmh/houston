@@ -29,7 +29,11 @@ fn shim_dir() -> PathBuf {
         #[cfg(unix)]
         {
             let path = dir.join("claude");
-            std::fs::write(&path, "#!/bin/sh\nexec cat\n").unwrap();
+            std::fs::write(
+                &path,
+                "#!/bin/sh\necho \"CLAUDE_CONFIG_DIR=[$CLAUDE_CONFIG_DIR]\"\nexec cat\n",
+            )
+            .unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -265,6 +269,7 @@ async fn respawn_refuses_a_swarm_tied_session() {
             delegation: None,
             inbox_unread: 0,
             tags: vec![],
+            session_origin: None,
         })
         .unwrap();
         let roster = vec![proto::SwarmRosterEntry {
@@ -329,8 +334,25 @@ async fn force_restarts_a_live_session_that_a_plain_respawn_refuses() {
     let fresh = daemon.respawn(live_id, false, None, None, true).unwrap();
     assert_ne!(fresh.id, live_id);
     assert_eq!(fresh.agent, proto::AgentKind::Custom);
+    assert_eq!(fresh.session_origin, Some(live_id));
+    let listed = daemon.list();
+    let listed = listed.iter().find(|s| s.id == fresh.id).unwrap();
+    assert_eq!(listed.session_origin, Some(live_id), "{listed:?}");
 
     daemon.kill(fresh.id).ok();
+}
+
+#[tokio::test]
+async fn consecutive_restarts_keep_the_original_session_identity() {
+    let _serial = SERIAL.lock().await;
+    let state_dir = tempfile::tempdir().unwrap();
+    let daemon = boot_daemon(state_dir.path().join("test.db"));
+    let project = tempfile::tempdir().unwrap();
+    let first = create_shell_session_no_integration(&daemon, project.path());
+    let second = daemon.respawn(first, false, None, None, true).unwrap();
+    let third = daemon.respawn(second.id, false, None, None, true).unwrap();
+    assert_eq!(third.session_origin, Some(first));
+    daemon.kill(third.id).unwrap();
 }
 
 #[tokio::test]
@@ -377,4 +399,94 @@ async fn a_long_opening_prompt_is_written_to_a_prompt_file() {
     );
 
     daemon.kill(info.id).ok();
+}
+
+async fn claude_config_dir_seen(rx: &mut houston_core::frame_queue::Observer, id: u32) -> String {
+    let out = collect_broadcast_until(rx, id, "]\r\n").await;
+    let start = out
+        .find("CLAUDE_CONFIG_DIR=[")
+        .expect("the shim reports its config dir")
+        + 19;
+    out[start..start + out[start..].find(']').unwrap()].to_string()
+}
+
+fn claude_session_on(daemon: &Arc<Daemon>, dir: &std::path::Path, profile: u32) -> u32 {
+    daemon
+        .create_session(CreateParams {
+            agent: proto::AgentKind::Claude,
+            project_dir: dir.to_path_buf(),
+            cmd: None,
+            cols: 80,
+            rows: 24,
+            cwd_from: None,
+            shell_integration: false,
+            auto_approve: false,
+            acp: None,
+            profile: Some(proto::ProfileChoice::Profile { id: profile }),
+            prompt: None,
+        })
+        .unwrap()
+        .id
+}
+
+fn upsert_profile(daemon: &Daemon, name: &str, dir: &str) -> u32 {
+    let proto::ServerMsg::AgentProfileState { profiles, .. } = daemon
+        .agent_profile_upsert(None, proto::AgentKind::Claude, name, dir)
+        .unwrap()
+    else {
+        panic!("agent_profile_upsert answers with the profile state");
+    };
+    profiles.iter().find(|p| p.name == name).unwrap().id
+}
+
+#[tokio::test]
+async fn a_restart_keeps_the_pane_on_its_agent_profile() {
+    let _serial = SERIAL.lock().await;
+    shim_dir();
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    let state_dir = tempfile::tempdir().unwrap();
+    let daemon = boot_daemon(state_dir.path().join("test.db"));
+    let tmp = tempfile::tempdir().unwrap();
+    let work = tmp.path().join("work-config").display().to_string();
+    let profile = upsert_profile(&daemon, "work", &work);
+    let mut rx = daemon.observe();
+
+    let old = claude_session_on(&daemon, tmp.path(), profile);
+    assert_eq!(claude_config_dir_seen(&mut rx, old).await, work);
+
+    let fresh = daemon.respawn(old, false, None, None, true).unwrap();
+    assert_eq!(fresh.profile_label.as_deref(), Some("work"));
+    assert_eq!(
+        claude_config_dir_seen(&mut rx, fresh.id).await,
+        work,
+        "the restarted pane must run on the profile its label names"
+    );
+
+    daemon.kill(fresh.id).ok();
+}
+
+#[tokio::test]
+async fn a_restart_whose_profile_was_deleted_runs_on_the_default_account_without_its_label() {
+    let _serial = SERIAL.lock().await;
+    shim_dir();
+    std::env::remove_var("CLAUDE_CONFIG_DIR");
+    let state_dir = tempfile::tempdir().unwrap();
+    let daemon = boot_daemon(state_dir.path().join("test.db"));
+    let tmp = tempfile::tempdir().unwrap();
+    let work = tmp.path().join("work-config").display().to_string();
+    let profile = upsert_profile(&daemon, "work", &work);
+    let mut rx = daemon.observe();
+
+    let old = claude_session_on(&daemon, tmp.path(), profile);
+    assert_eq!(claude_config_dir_seen(&mut rx, old).await, work);
+    daemon.agent_profile_delete(profile).unwrap();
+
+    let fresh = daemon.respawn(old, false, None, None, true).unwrap();
+    assert_eq!(
+        fresh.profile_label, None,
+        "a pane on the default account must not show the deleted profile's label"
+    );
+    assert_eq!(claude_config_dir_seen(&mut rx, fresh.id).await, "");
+
+    daemon.kill(fresh.id).ok();
 }

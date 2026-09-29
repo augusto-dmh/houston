@@ -255,8 +255,9 @@ import {
   setRatio,
   stackWith,
   swapLeaf,
-  syncTree,
   syncWorkspaceGrids,
+  respawnedSessions,
+  syncSessionLayout,
   unstack,
   updateBrowserUrl,
   type BrowserNode,
@@ -324,8 +325,8 @@ export { isTitlebarDragEligible, isBareTitlebarTarget };
 const SELECTED_WS_KEY = "tr-selected-workspace";
 
 // { [workspacePath]: paneId } — the DURABLE pane id, never a session id:
-// `respawn` retires the old session for a fresh one on every resume, so a
-// stored session id would name nothing by the next boot.
+// `respawn` gives the pane a new session id on every restart and boot
+// restore, so a stored session id would name nothing by the next boot.
 const FOCUSED_PANE_KEY = "tr-focused-pane";
 
 function readFocusedPanes(): Record<string, string> {
@@ -1486,6 +1487,11 @@ export function App(): React.JSX.Element {
     }
   }, [conn]);
 
+  const replacedSessions = useMemo(
+    () => respawnedSessions(sessions.values()),
+    [sessions],
+  );
+
   const warmLayouts = useMemo(() => {
     const map = new Map<string, LayoutState>();
     for (const w of orderedWorkspaces) {
@@ -1501,6 +1507,7 @@ export function App(): React.JSX.Element {
         active,
         wsSessionIds,
         layouts,
+        replacedSessions,
       );
       for (const [key, st] of synced) map.set(key, st);
     }
@@ -1509,6 +1516,7 @@ export function App(): React.JSX.Element {
     orderedWorkspaces,
     layouts,
     sessions,
+    replacedSessions,
     gridsFor,
     activeGridId,
   ]);
@@ -1585,14 +1593,14 @@ export function App(): React.JSX.Element {
   }, [workspaces, sessions]);
 
   useEffect(() => {
-    if (selectedWs !== "all") return;
+    if (selectedWs !== "all" || conn.kind !== "ready") return;
     const ids = idsKey ? idsKey.split(",").map(Number) : [];
     setLayouts((prev) => {
       const cur = prev.get("all") ?? loadLayout("all");
-      const tree = syncTree(cur.tree, ids, cur.cols);
+      const tree = syncSessionLayout(cur.tree, ids, cur.cols, replacedSessions);
       return new Map(prev).set("all", { ...cur, tree });
     });
-  }, [selectedWs, idsKey]);
+  }, [selectedWs, idsKey, replacedSessions, conn.kind]);
 
   const gridSyncKey = useMemo(() => {
     const perWs = workspaces
@@ -1632,6 +1640,7 @@ export function App(): React.JSX.Element {
           active,
           wsSessionIds,
           prev,
+          replacedSessions,
         );
         for (const [key, st] of synced) {
           next.set(key, st);
@@ -1640,7 +1649,14 @@ export function App(): React.JSX.Element {
       }
       return changed ? next : prev;
     });
-  }, [gridSyncKey, workspaces, sessions, gridsFor, activeGridId]);
+  }, [
+    gridSyncKey,
+    workspaces,
+    sessions,
+    replacedSessions,
+    gridsFor,
+    activeGridId,
+  ]);
 
   useEffect(() => {
     if (conn.kind !== "ready") return;
@@ -1715,13 +1731,13 @@ export function App(): React.JSX.Element {
       const persisted = loadLayout("all");
       return {
         ...persisted,
-        tree: syncTree(persisted.tree, wsIds, persisted.cols),
+        tree: syncSessionLayout(persisted.tree, wsIds, persisted.cols, replacedSessions),
       };
     }
     const key = gridStorageKey(selectedWs, activeGridId(selectedWs));
     return warmLayouts.get(key) ?? loadLayout(key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layouts, warmLayouts, selectedWs, idsKey, activeGridId]);
+  }, [layouts, warmLayouts, selectedWs, idsKey, activeGridId, replacedSessions]);
   const currentTree = wsState.tree;
   currentTreeRef.current = currentTree;
   const orderedIds = preorderSessions(currentTree);

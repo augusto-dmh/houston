@@ -60,6 +60,7 @@ fn seed_husk(state_dir: &std::path::Path, dir: &std::path::Path) {
         delegation: None,
         inbox_unread: 0,
         tags: vec![],
+        session_origin: None,
     })
     .unwrap();
 }

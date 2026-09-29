@@ -1648,6 +1648,7 @@ struct SpawnParams {
     wrap: Option<Vec<String>>,
     acp: Option<String>,
     profile_label: Option<String>,
+    session_origin: Option<u32>,
 }
 
 type ProfileSpawnEnv = (Option<(String, String)>, Option<String>);
@@ -3375,6 +3376,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: m.tags.clone(),
+            session_origin: None,
         };
         let vt = adopted_emulator(m);
         Arc::new(Session {
@@ -6050,6 +6052,12 @@ impl Daemon {
             .collect();
         out.extend(self.dead.lock().expect("dead lock").values().cloned());
         for info in out.iter_mut() {
+            if info.session_origin.is_none() {
+                info.session_origin = Some(self.db.session_origin(info.id).unwrap_or_else(|e| {
+                    tracing::warn!("reading session origin for {}: {e}", info.id);
+                    info.id
+                }));
+            }
             if !info.hidden {
                 let (live, waiting) = self.child_counts_of(info.id);
                 info.live_children = live;
@@ -6292,6 +6300,7 @@ impl Daemon {
             acp: p.acp,
             profile_label,
             tags: Vec::new(),
+            session_origin: None,
         })?;
         self.record_approval_mode(info.id, approval);
         Ok(info)
@@ -6657,6 +6666,7 @@ impl Daemon {
             );
         }
 
+        let (extra_env, profile_label) = self.respawn_profile(old_id, agent, profile_label);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let cwd = Self::respawn_cwd(cwd_override, &cwd, &project_dir);
         let spawned = self.spawn_session(SpawnParams {
@@ -6676,11 +6686,12 @@ impl Daemon {
             swarm_agent: None,
             spawned_by,
             extra_args: Vec::new(),
-            extra_env: Vec::new(),
+            extra_env,
             wrap: None,
             acp,
             profile_label,
             tags: old_tags,
+            session_origin: Some(self.db.session_origin(old_id)?),
         })?;
 
         if was_dead {
@@ -6705,6 +6716,27 @@ impl Daemon {
             self.broadcast_live_children(parent);
         }
         Ok(spawned)
+    }
+
+    /// The profile environment a respawned pane runs with. A label whose profile
+    /// is gone falls back to the default account and drops the label with it.
+    fn respawn_profile(
+        &self,
+        old_id: u32,
+        agent: proto::AgentKind,
+        label: Option<String>,
+    ) -> ProfileSpawnEnvList {
+        let Some(label) = label else {
+            return (Vec::new(), None);
+        };
+        self.resolve_named_profile(agent, &label)
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "respawning session {old_id} on the default account without its profile \
+                     label {label:?}: {e:#}"
+                );
+                (Vec::new(), None)
+            })
     }
 
     fn flush_shell_token_redactor(self: &Arc<Self>, id: u32, session: &Arc<Session>) {
@@ -6932,6 +6964,7 @@ impl Daemon {
             wrap,
             acp,
             profile_label,
+            session_origin,
         } = p;
         let pty = native_pty_system();
         let pair = pty
@@ -7169,6 +7202,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: p_tags.clone(),
+            session_origin: Some(session_origin.unwrap_or(id)),
         };
 
         let session = Arc::new(Session {
@@ -7530,6 +7564,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: Vec::new(),
+            session_origin: None,
         };
         let session = Arc::new(Session {
             info: info.clone(),
@@ -8841,6 +8876,7 @@ impl Daemon {
             acp: None,
             profile_label: None,
             tags: Vec::new(),
+            session_origin: None,
         });
         if let Err(e) = spawned {
             self.handoff_jobs
@@ -9205,7 +9241,7 @@ impl Daemon {
             .cloned();
         if let Some(session) = session {
             self.mark_detected(d.session, &session, provider);
-            self.note_transcript_link(d.session, d);
+            self.note_transcript_link(d.session, provider, d);
         }
         self.note_hook_last_message(
             d.session,
@@ -9238,7 +9274,28 @@ impl Daemon {
         verdict
     }
 
-    fn note_transcript_link(&self, session: u32, d: &crate::hook_drop::HookDrop) {
+    fn note_transcript_link(
+        &self,
+        session: u32,
+        provider: proto::AgentKind,
+        d: &crate::hook_drop::HookDrop,
+    ) {
+        if !crate::agent_events::names_root_conversation(provider, &d.event) {
+            return;
+        }
+        // Antigravity's first conversationId is the root one (see
+        // `correlate_antigravity_drop`); any other belongs to a sub-agent.
+        if provider == proto::AgentKind::Antigravity {
+            let roots = self
+                .antigravity_roots
+                .lock()
+                .expect("antigravity roots lock");
+            if let (Some(id), Some(root)) = (d.session_id.as_deref(), roots.get(&session)) {
+                if id != root {
+                    return;
+                }
+            }
+        }
         let mut links = self.transcript_links.lock().expect("transcript links lock");
         let Some(next) = transcript_link_update(
             links.get(&session),
@@ -12266,6 +12323,7 @@ impl Daemon {
             acp: None,
             profile_label,
             tags: Vec::new(),
+            session_origin: None,
         });
         let info = spawned?;
         self.record_approval_mode(sid, requested_mode);

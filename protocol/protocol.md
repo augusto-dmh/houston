@@ -1,4 +1,4 @@
-# Wire protocol v117
+# Wire protocol v118
 
 Transport: one WebSocket at `ws://127.0.0.1:<port>/ws`, served by the daemon
 (`core/houston-core/src/server.rs`). Auth: a bearer token in the first message —
@@ -419,7 +419,9 @@ SessionInfo        id, agent: AgentKind, project_dir, cwd (the actual run dir), 
                    delegation?: DelegationInfo, inbox_unread (v96: undelivered, unresolved pane_inbox rows
                    addressed to this pane),
                    tags (v100: tag ids in application order; resolved against the tag registry —
-                   ids, never names, so a rename/recolor needs no session rewrite)
+                   ids, never names, so a rename/recolor needs no session rewrite),
+                   session_origin? (v118: original session id persisted across `session_respawn` and
+                   boot restore; clients retain the pane across missed replacements)
 DelegationInfo     parent, role?, state: DelegationState, stalled, result_staged, superseded, ended_at?,
                    stop_reason?, turn_end_source: TurnEndSource, inbox_owed, inbox_provisional,
                    last_result_corrected_by?, capability_note?, hold_reason?, reusable (v98: what the child
@@ -873,6 +875,7 @@ Only the current window; older bumps live in git history.
 
 | Version | What changed |
 |---|---|
+| 118 | **A restarted session keeps its original pane.** `SessionInfo` gains `session_origin`, the original session id persisted across successive restarts and boot restores. Clients retain the pane in any grid or stack even when they missed intermediate replacements. No message is added or removed |
 | 117 | **Harness review results have their own view.** New `harness_state`, `harness_routine_create`, `harness_report` and `harness_decide` client messages and `harness_state`, `harness_report` and `harness_changed` replies, with `HarnessReview`, `HarnessReviewStatus`, `HarnessFinding` and `HarnessFindingState`. A review run publishes with the `harness_publish` MCP tool or `hs-harness publish`, offered only to its own pane, instead of `pane_submit` to the operator's inbox; the daemon stores the run, its findings and the operator's decisions per workspace. The state includes native Claude and Codex model options from the shared local catalog, which describes metadata rather than account availability. No existing message changes |
 | 116 | **The notification feed is removed.** Gone from the wire: the server's `agent_notice` broadcast and the `AgentNoticeKind` enum. `agent_status` keeps carrying every lifecycle change (working, idle, needs-input) and the orchestration inbox messages (`inbox_list`/`inbox_ack`/`inbox_resolve`/`inbox_deliver_now`, `inbox_rows`, `inbox_changed`) are unchanged; there is simply no separate attention feed for a client notification center |
 | 115 | **A workspace without git is not a failure.** `git_status`'s reply gains `not_a_repo`. A plain existing directory with no Git metadata replies `not_a_repo: true` with empty files and null branch fields instead of an `error`, so the renderer shows its not-a-repo state without an app-wide error toast. A missing directory or any Git probe failure remains an `error`; no other message changes |

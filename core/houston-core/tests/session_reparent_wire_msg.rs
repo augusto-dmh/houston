@@ -151,6 +151,7 @@ async fn session_reparent_over_the_wire_refuses_a_swarm_tied_session() {
             delegation: None,
             inbox_unread: 0,
             tags: vec![],
+            session_origin: None,
         })
         .unwrap();
         let roster = vec![proto::SwarmRosterEntry {

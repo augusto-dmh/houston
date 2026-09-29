@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump once per wire-touching batch (`/ws` only); several PRs may land
 /// under one coordinated bump instead of each incrementing it.
-pub const PROTOCOL_VERSION: u32 = 117;
+pub const PROTOCOL_VERSION: u32 = 118;
 
 pub const VOICE_LEVEL_INTERVAL_MS: u64 = 50;
 
@@ -1275,6 +1275,9 @@ pub struct SessionInfo {
     pub inbox_unread: u32,
     #[serde(default)]
     pub tags: Vec<u32>,
+    #[serde(default)]
+    #[cfg_attr(feature = "ts-gen", ts(optional = nullable, type = "number | null"))]
+    pub session_origin: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
