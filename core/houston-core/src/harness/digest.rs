@@ -876,26 +876,129 @@ fn session_value(s: &Session, prompts: &[Prompt], dropped: usize) -> Value {
     })
 }
 
-/// Drops prompts from the middle until the line fits, keeping the opening ask
-/// and the latest ones, where corrections of course land.
+/// Drops middle prompts until the line fits, keeping the opening ask and the
+/// latest ones, then collection entries, then string length; a line that still
+/// does not fit is refused rather than written oversized.
 fn session_line(
     s_value: impl Fn(&[Prompt], usize) -> Value,
     prompts: &[Prompt],
     max: usize,
-) -> String {
+) -> Result<String> {
     let mut kept: Vec<Prompt> = prompts.to_vec();
     let mut dropped = 0;
-    loop {
-        let line = s_value(&kept, dropped).to_string();
-        if line.len() <= max || kept.len() <= 2 {
-            return line;
+    let mut v = loop {
+        let v = s_value(&kept, dropped);
+        let len = v.to_string().len();
+        if len <= max {
+            return Ok(v.to_string());
         }
-        let excess = line.len() - max;
+        if kept.len() <= 2 {
+            break v;
+        }
+        let excess = len - max;
         let mut freed = 0;
         while freed < excess && kept.len() > 2 {
             let mid = kept.len() / 2;
             freed += kept.remove(mid).text.len().min(CONTEXT_PASTE_MAX_CHARS * 4) + 16;
             dropped += 1;
+        }
+    };
+    for keep in SHRINK_KEEP {
+        shrink_collections(&mut v, keep);
+        let line = v.to_string();
+        if line.len() <= max {
+            return Ok(line);
+        }
+    }
+    shrink_strings(&mut v);
+    let line = v.to_string();
+    if line.len() <= max {
+        return Ok(line);
+    }
+    bail!(
+        "session {}: the digest line is {} bytes after dropping prompts, collection entries \
+         and long strings, over the {max} byte per-session cap",
+        v["id"],
+        line.len()
+    )
+}
+
+/// Entries each collection keeps at successive stages of shrinking a line.
+const SHRINK_KEEP: [usize; 4] = [32, 8, 2, 0];
+/// Collections a session accumulates without a fixed bound.
+const SHRINKABLE: [&str; 15] = [
+    "models",
+    "skills",
+    "skill_sources",
+    "subagents",
+    "tools",
+    "tool_errors",
+    "tool_error_samples",
+    "denials",
+    "classifier_reasons",
+    "friction",
+    "machine",
+    "automatic",
+    "automatic_answered_with_text",
+    "automatic_reply_samples",
+    "denied",
+];
+/// Length of the last stage's strings: enough to recognise a title or path.
+const SHRINK_STRING_CHARS: usize = 500;
+
+/// Keeps `keep` entries of each collection (the largest counts of a count map)
+/// and records how many each lost under `truncated`, so a reader knows the
+/// line is partial.
+fn shrink_collections(v: &mut Value, keep: usize) {
+    let mut truncated = v
+        .get("truncated")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for field in SHRINKABLE {
+        let lost = match v.get_mut(field) {
+            Some(Value::Array(a)) if a.len() > keep => {
+                let lost = a.len() - keep;
+                a.truncate(keep);
+                lost
+            }
+            Some(Value::Object(m)) if m.len() > keep => {
+                let mut entries: Vec<(String, Value)> = std::mem::take(m).into_iter().collect();
+                entries.sort_by_key(|(_, n)| std::cmp::Reverse(n.as_u64().unwrap_or(0)));
+                let lost = entries.len() - keep;
+                m.extend(entries.into_iter().take(keep));
+                lost
+            }
+            _ => 0,
+        };
+        if lost > 0 {
+            let before = truncated.get(field).and_then(Value::as_u64).unwrap_or(0);
+            truncated.insert(field.to_string(), json!(before + lost as u64));
+        }
+    }
+    if !truncated.is_empty() {
+        v["truncated"] = Value::Object(truncated);
+    }
+}
+
+fn shrink_strings(v: &mut Value) {
+    for field in [
+        "title",
+        "branch",
+        "cwd",
+        "path",
+        "fork_of",
+        "last_assistant_text",
+    ] {
+        if let Some(s) = v.get(field).and_then(Value::as_str) {
+            v[field] = json!(cap_chars(s, SHRINK_STRING_CHARS));
+        }
+    }
+    if let Some(prompts) = v.get_mut("prompts").and_then(Value::as_array_mut) {
+        for p in prompts {
+            if let Some(s) = p.get("text").and_then(Value::as_str) {
+                p["text"] = json!(cap_chars(s, SHRINK_STRING_CHARS));
+            }
         }
     }
 }
@@ -964,7 +1067,7 @@ pub fn run(req: &Request) -> Result<Outcome> {
             |p, d| session_value(s, p, d),
             &s.prompts,
             req.session_line_max,
-        );
+        )?;
         total += line.len() + 1;
         lines.push(line);
     }
@@ -1078,7 +1181,8 @@ mod tests {
             id: "s".into(),
             ..Default::default()
         };
-        let line = session_line(|p, d| session_value(&s, p, d), &prompts, SESSION_LINE_MAX);
+        let line =
+            session_line(|p, d| session_value(&s, p, d), &prompts, SESSION_LINE_MAX).unwrap();
         assert!(line.len() <= SESSION_LINE_MAX, "{} bytes", line.len());
         let v: Value = serde_json::from_str(&line).unwrap();
         let kept = v["prompts"].as_array().unwrap();
@@ -1092,6 +1196,65 @@ mod tests {
             v["prompts_dropped"].as_u64().unwrap() as usize + kept.len(),
             300
         );
+    }
+
+    #[test]
+    fn a_session_over_the_cap_through_its_collections_is_shrunk_below_it() {
+        let mut s = Session {
+            provider: "claude",
+            id: "s".into(),
+            ..Default::default()
+        };
+        for i in 0..4_000u64 {
+            s.tools.insert(format!("mcp__server_{i:04}__some_tool"), i);
+            s.subagents
+                .push(json!({ "type": format!("agent-{i}"), "description": "d".repeat(40) }));
+        }
+        let prompts = [prompt("first ask"), prompt("last ask")];
+        let unshrunk = session_value(&s, &prompts, 0).to_string().len();
+        assert!(unshrunk > SESSION_LINE_MAX, "the fixture is over the cap");
+
+        let line =
+            session_line(|p, d| session_value(&s, p, d), &prompts, SESSION_LINE_MAX).unwrap();
+        assert!(line.len() <= SESSION_LINE_MAX, "{} bytes", line.len());
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["prompts"].as_array().unwrap().len(), 2);
+        let tools = v["tools"].as_object().unwrap();
+        assert!(
+            tools.contains_key("mcp__server_3999__some_tool"),
+            "the largest counts are kept"
+        );
+        assert_eq!(
+            v["truncated"]["tools"].as_u64().unwrap() as usize + tools.len(),
+            4_000
+        );
+        assert_eq!(
+            v["truncated"]["subagents"].as_u64().unwrap() as usize
+                + v["subagents"].as_array().unwrap().len(),
+            4_000
+        );
+    }
+
+    #[test]
+    fn a_session_that_cannot_fit_is_refused_naming_cap_and_size() {
+        let s = Session {
+            provider: "claude",
+            id: "s".into(),
+            ..Default::default()
+        };
+        let prompts = [prompt(&"a".repeat(600)), prompt(&"b".repeat(600))];
+        let err = session_line(|p, d| session_value(&s, p, d), &prompts, 300)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("over the 300 byte per-session cap"), "{err}");
+        assert!(err.contains("session \"s\""), "{err}");
+        let size: usize = err
+            .split("the digest line is ")
+            .nth(1)
+            .and_then(|r| r.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .expect("the error names the size");
+        assert!(size > 300, "{err}");
     }
 
     #[test]
