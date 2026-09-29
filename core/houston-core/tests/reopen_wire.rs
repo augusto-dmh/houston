@@ -269,7 +269,7 @@ async fn respawn_refuses_a_swarm_tied_session() {
             delegation: None,
             inbox_unread: 0,
             tags: vec![],
-            respawned_from: None,
+            session_origin: None,
             resumable: false,
             resume_notice: None,
         })
@@ -336,12 +336,25 @@ async fn force_restarts_a_live_session_that_a_plain_respawn_refuses() {
     let fresh = daemon.respawn(live_id, false, None, None, true).unwrap();
     assert_ne!(fresh.id, live_id);
     assert_eq!(fresh.agent, proto::AgentKind::Custom);
-    assert_eq!(fresh.respawned_from, Some(live_id));
+    assert_eq!(fresh.session_origin, Some(live_id));
     let listed = daemon.list();
     let listed = listed.iter().find(|s| s.id == fresh.id).unwrap();
-    assert_eq!(listed.respawned_from, Some(live_id), "{listed:?}");
+    assert_eq!(listed.session_origin, Some(live_id), "{listed:?}");
 
     daemon.kill(fresh.id).ok();
+}
+
+#[tokio::test]
+async fn consecutive_restarts_keep_the_original_session_identity() {
+    let _serial = SERIAL.lock().await;
+    let state_dir = tempfile::tempdir().unwrap();
+    let daemon = boot_daemon(state_dir.path().join("test.db"));
+    let project = tempfile::tempdir().unwrap();
+    let first = create_shell_session_no_integration(&daemon, project.path());
+    let second = daemon.respawn(first, false, None, None, true).unwrap();
+    let third = daemon.respawn(second.id, false, None, None, true).unwrap();
+    assert_eq!(third.session_origin, Some(first));
+    daemon.kill(third.id).unwrap();
 }
 
 #[tokio::test]

@@ -105,9 +105,10 @@ Restore budget caps how many sessions Houston brings back automatically when it 
 again after a clean shutdown, rather than restoring every session that was open.
 
 A restored session, or one you restart from its pane, comes back in the same cell it
-left: the same grid, split and stack, whichever grid is active. It runs on the same agent
-profile. If that profile has since been deleted, it runs on the default account and the
-pane no longer shows the profile's name.
+left: the same grid, split and stack, whichever grid is active. This also applies to
+repeated restarts while the application is closed and to All workspaces. It runs on the
+same agent profile. If that profile has since been deleted, it runs on the default
+account and the pane no longer shows the profile's name.
 
 A restored Claude pane reopens the conversation it was running once that conversation has
 had at least one prompt: the CLI redraws it and waits, and nothing is sent to the model

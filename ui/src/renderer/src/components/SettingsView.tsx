@@ -128,6 +128,7 @@ interface Props {
   onUpdateCheckNow: () => void
   onUpdatePolicySet: (policy: UpdatePolicy) => void
   onOpenExternal: (url: string) => void
+  liveSessionCount?: number
 
   onRestoreBudgetSet: (n: number) => void
   onRestoreResumeSet: (on: boolean) => void
@@ -218,6 +219,7 @@ function SectionDispatch({
   onUpdateCheckNow,
   onUpdatePolicySet,
   onOpenExternal,
+  liveSessionCount,
   onRestoreBudgetSet,
   onRestoreResumeSet,
   sessionPolicy,
@@ -353,6 +355,7 @@ function SectionDispatch({
             onUpdateCheckNow={onUpdateCheckNow}
             onUpdatePolicySet={onUpdatePolicySet}
             onOpenExternal={onOpenExternal}
+            liveSessionCount={liveSessionCount}
           />
         )}
 

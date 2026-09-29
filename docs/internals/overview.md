@@ -348,8 +348,9 @@ docs/                     this tree; see docs/README.md
 The workspace/grid/pane hierarchy is split across two stores on purpose: the daemon knows
 workspaces and sessions; the renderer owns how they are laid out. `LeafNode.id` is a durable
 pane identity distinct from the session in it, so a respawned session keeps its pane: respawn
-mints a new session id, `SessionInfo.respawned_from` names the retired one, and the renderer
-moves the new id into the retired id's leaf in whichever saved grid holds it.
+mints a new session id, while `SessionInfo.session_origin` retains the initial id in SQLite.
+The renderer saves that origin in its leaf and maps it to the newest session, preserving
+the pane across repeated restarts in workspace grids, stacks and All workspaces.
 
 ## Budgets
 

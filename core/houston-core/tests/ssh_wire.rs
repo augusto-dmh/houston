@@ -459,7 +459,7 @@ async fn ssh_husks_are_deferred_never_auto_reconnected() {
             delegation: None,
             inbox_unread: 0,
             tags: vec![],
-            respawned_from: None,
+            session_origin: None,
             resumable: false,
             resume_notice: None,
         })

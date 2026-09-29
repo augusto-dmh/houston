@@ -5,6 +5,7 @@ export interface LeafNode {
   kind: 'leaf'
   session: number
   id: string
+  session_origin?: number
 }
 export interface BrowserNode {
   kind: 'browser'
@@ -301,6 +302,13 @@ export function preorderNonSessionPanes(node: LayoutNode | null): PaneNode[] {
 export function regrid(tree: LayoutNode | null, ids: number[], cols: number): LayoutNode | null {
   const kept = preorderNonSessionPanes(tree)
   let next = adoptPaneIds(evenGrid(ids, cols), sessionPaneIds(tree))
+  const origins = new Map<number, number>()
+  for (const slot of preorderSlots(tree)) {
+    for (const pane of slot.kind === 'stack' ? slot.children : [slot]) {
+      if (pane.kind === 'leaf') origins.set(pane.session_origin ?? pane.session, pane.session)
+    }
+  }
+  next = restoreSessionSlots(next, origins)
   for (const pane of kept) next = next === null ? pane : appendToRoot(next, pane)
   return next
 }
@@ -830,30 +838,51 @@ export function removeGrid(path: string, gridId: string): GridMeta[] {
   return next
 }
 
-// Old id -> the id `respawn` replaced it with, from `SessionInfo.respawned_from`.
+// Stable origin -> newest session, even while the retired row is still in the roster.
 export function respawnedSessions(
-  sessions: Iterable<{ id: number; respawned_from?: number | null }>
+  sessions: Iterable<{ id: number; session_origin?: number | null }>
 ): Map<number, number> {
   const replaced = new Map<number, number>()
-  for (const s of sessions) if (s.respawned_from != null) replaced.set(s.respawned_from, s.id)
+  for (const s of sessions) {
+    const origin = s.session_origin ?? s.id
+    replaced.set(origin, Math.max(replaced.get(origin) ?? s.id, s.id))
+  }
   return replaced
 }
 
-// A replacement takes over the retired session's pane in every grid of the
-// workspace, unless some grid already shows the replacement.
-function reviveReplaced(
-  loaded: { state: LayoutState }[],
-  replaced: ReadonlyMap<number, number>
-): void {
-  const assigned = new Set(loaded.flatMap(({ state }) => preorderSessions(state.tree)))
-  for (const [old, next] of replaced) {
-    if (!assigned.has(old) || assigned.has(next)) continue
-    for (const entry of loaded) {
-      const pane = sessionPaneIds(entry.state.tree).get(old)
-      const tree = pane === undefined ? null : reviveLeaf(entry.state.tree, pane, next)
-      if (tree) entry.state = { ...entry.state, tree }
+function restoreSessionSlots(
+  tree: LayoutNode | null,
+  replaced: ReadonlyMap<number, number>,
+  assigned = new Set(preorderSessions(tree))
+): LayoutNode | null {
+  const origins = new Map([...replaced].map(([origin, session]) => [session, origin]))
+  const walk = (node: LayoutNode): LayoutNode => {
+    if (node.kind === 'split') return { ...node, children: node.children.map(walk) }
+    if (node.kind === 'stack') return { ...node, children: node.children.map((c) => walk(c) as PaneNode) }
+    if (node.kind !== 'leaf') return node
+    const origin = node.session_origin ?? origins.get(node.session) ?? node.session
+    const session = replaced.get(origin) ?? node.session
+    if (session !== node.session) {
+      if (assigned.has(session)) return node
+      assigned.delete(node.session)
+      assigned.add(session)
     }
+    return origin === session && node.session_origin === undefined
+      ? node
+      : { ...node, session, session_origin: origin }
   }
+  return tree === null ? null : walk(tree)
+}
+
+export function syncSessionLayout(
+  tree: LayoutNode | null,
+  ids: number[],
+  cols: number,
+  replaced: ReadonlyMap<number, number>
+): LayoutNode | null {
+  const latest = new Set(replaced.values())
+  const alive = replaced.size === 0 ? ids : ids.filter((id) => latest.has(id))
+  return restoreSessionSlots(syncTree(restoreSessionSlots(tree, replaced), alive, cols), replaced)
 }
 
 export function syncWorkspaceGrids(
@@ -864,13 +893,17 @@ export function syncWorkspaceGrids(
   current: Map<string, LayoutState>,
   replaced: ReadonlyMap<number, number> = new Map()
 ): Map<string, LayoutState> {
-  const alive = wsAliveIds.filter((id) => !replaced.has(id))
+  const latest = new Set(replaced.values())
+  const alive = replaced.size === 0 ? wsAliveIds : wsAliveIds.filter((id) => latest.has(id))
   const wsAlive = new Set(alive)
   const loaded = grids.map((g) => {
     const key = gridStorageKey(path, g.id)
     return { gridId: g.id, key, state: current.get(key) ?? loadLayout(key) }
   })
-  reviveReplaced(loaded, replaced)
+  const assigned = new Set(loaded.flatMap(({ state }) => preorderSessions(state.tree)))
+  for (const entry of loaded) {
+    entry.state = { ...entry.state, tree: restoreSessionSlots(entry.state.tree, replaced, assigned) }
+  }
   const allAssigned = new Set(loaded.flatMap(({ state }) => preorderSessions(state.tree)))
   const next = new Map<string, LayoutState>()
   for (const { gridId, key, state } of loaded) {
@@ -880,7 +913,7 @@ export function syncWorkspaceGrids(
     if (gridId === activeGrid) {
       for (const id of alive) if (!ownSet.has(id) && !allAssigned.has(id)) ids.push(id)
     }
-    const tree = syncTree(state.tree, ids, state.cols)
+    const tree = restoreSessionSlots(syncTree(state.tree, ids, state.cols), replaced)
     next.set(key, { ...state, tree })
   }
   return next

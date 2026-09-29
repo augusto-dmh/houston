@@ -1183,6 +1183,13 @@ struct ReapArm {
     handle: tokio::task::JoinHandle<()>,
 }
 
+/// What `manage_shutdown_inner` requires of the live set before it stops it.
+enum ShutdownGuard<'a> {
+    Unconditional,
+    IfIdle,
+    IfExactly(&'a [u32]),
+}
+
 #[derive(Debug)]
 pub struct ShutdownFailure {
     pub reason: String,
@@ -1647,7 +1654,7 @@ struct SpawnParams {
     wrap: Option<Vec<String>>,
     acp: Option<String>,
     profile_label: Option<String>,
-    respawned_from: Option<u32>,
+    session_origin: Option<u32>,
     /// The conversation the new row carries: resumed now, or kept for a later Restart.
     resume_handle: Option<ResumeHandle>,
     resume_notice: Option<String>,
@@ -2786,7 +2793,7 @@ impl Daemon {
     pub fn manage_shutdown(
         self: &Arc<Self>,
     ) -> Result<proto::ManageDaemonShutdownOk, ShutdownFailure> {
-        self.manage_shutdown_inner(false)
+        self.manage_shutdown_inner(ShutdownGuard::Unconditional)
     }
 
     /// `manage_shutdown` for an installer: the gate goes up first, so a session
@@ -2795,12 +2802,22 @@ impl Daemon {
     pub fn manage_shutdown_if_idle(
         self: &Arc<Self>,
     ) -> Result<proto::ManageDaemonShutdownOk, ShutdownFailure> {
-        self.manage_shutdown_inner(true)
+        self.manage_shutdown_inner(ShutdownGuard::IfIdle)
+    }
+
+    /// `manage_shutdown` for the update modal: stops only when the live sessions
+    /// are exactly the confirmed ids; a set that changed since the modal listed
+    /// it is a refusal naming both sets, never a victim.
+    pub fn manage_shutdown_if_sessions(
+        self: &Arc<Self>,
+        expected: &[u32],
+    ) -> Result<proto::ManageDaemonShutdownOk, ShutdownFailure> {
+        self.manage_shutdown_inner(ShutdownGuard::IfExactly(expected))
     }
 
     fn manage_shutdown_inner(
         self: &Arc<Self>,
-        refuse_if_live: bool,
+        guard: ShutdownGuard<'_>,
     ) -> Result<proto::ManageDaemonShutdownOk, ShutdownFailure> {
         self.shutting_down.store(true, Ordering::Release);
         let routines_armed = self.db.enabled_routine_count().unwrap_or_else(|e| {
@@ -2815,17 +2832,38 @@ impl Daemon {
             .filter(|(_, s)| s.state.lock().expect("state lock").is_live())
             .map(|(id, _)| *id)
             .collect();
-        if refuse_if_live && !live_ids.is_empty() {
-            self.shutting_down.store(false, Ordering::Release);
-            return Err(ShutdownFailure {
-                reason: format!(
-                    "refusing to stop: {} live session(s) are running (ids {:?}); an update must \
-                     not kill them, and nothing was stopped",
-                    live_ids.len(),
-                    live_ids
-                ),
-                unterminated: live_ids,
-            });
+        match guard {
+            ShutdownGuard::Unconditional => {}
+            ShutdownGuard::IfIdle if live_ids.is_empty() => {}
+            ShutdownGuard::IfIdle => {
+                self.shutting_down.store(false, Ordering::Release);
+                return Err(ShutdownFailure {
+                    reason: format!(
+                        "refusing to stop: {} live session(s) are running (ids {:?}); an update \
+                         must not kill them, and nothing was stopped",
+                        live_ids.len(),
+                        live_ids
+                    ),
+                    unterminated: live_ids,
+                });
+            }
+            ShutdownGuard::IfExactly(expected) => {
+                let mut live_sorted = live_ids.clone();
+                live_sorted.sort_unstable();
+                let mut expected_sorted = expected.to_vec();
+                expected_sorted.sort_unstable();
+                expected_sorted.dedup();
+                if live_sorted != expected_sorted {
+                    self.shutting_down.store(false, Ordering::Release);
+                    return Err(ShutdownFailure {
+                        reason: format!(
+                            "refusing to stop: live sessions are {live_sorted:?}, the update \
+                             confirmed {expected_sorted:?}; nothing was stopped"
+                        ),
+                        unterminated: live_ids,
+                    });
+                }
+            }
         }
         let mut kill_failures = Vec::new();
         for id in &live_ids {
@@ -3364,7 +3402,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: m.tags.clone(),
-            respawned_from: None,
+            session_origin: None,
             resumable: false,
             resume_notice: None,
         };
@@ -6042,6 +6080,12 @@ impl Daemon {
             .collect();
         out.extend(self.dead.lock().expect("dead lock").values().cloned());
         for info in out.iter_mut() {
+            if info.session_origin.is_none() {
+                info.session_origin = Some(self.db.session_origin(info.id).unwrap_or_else(|e| {
+                    tracing::warn!("reading session origin for {}: {e}", info.id);
+                    info.id
+                }));
+            }
             if !info.hidden {
                 let (live, waiting) = self.child_counts_of(info.id);
                 info.live_children = live;
@@ -6285,7 +6329,7 @@ impl Daemon {
             acp: p.acp,
             profile_label,
             tags: Vec::new(),
-            respawned_from: None,
+            session_origin: None,
             resume_handle: None,
             resume_notice: None,
         })?;
@@ -6730,7 +6774,7 @@ impl Daemon {
             acp,
             profile_label,
             tags: old_tags,
-            respawned_from: Some(old_id),
+            session_origin: Some(self.db.session_origin(old_id)?),
             resume_handle,
             resume_notice,
         })?;
@@ -7226,7 +7270,7 @@ impl Daemon {
             wrap,
             acp,
             profile_label,
-            respawned_from,
+            session_origin,
             resume_handle,
             resume_notice,
         } = p;
@@ -7476,7 +7520,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: p_tags.clone(),
-            respawned_from,
+            session_origin: Some(session_origin.unwrap_or(id)),
             resumable: resume_handle.is_some(),
             resume_notice,
         };
@@ -7842,7 +7886,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: Vec::new(),
-            respawned_from: None,
+            session_origin: None,
             resumable: false,
             resume_notice: None,
         };
@@ -9158,7 +9202,7 @@ impl Daemon {
             acp: None,
             profile_label: None,
             tags: Vec::new(),
-            respawned_from: None,
+            session_origin: None,
             resume_handle: None,
             resume_notice: None,
         });
@@ -12623,7 +12667,7 @@ impl Daemon {
             acp: None,
             profile_label,
             tags: Vec::new(),
-            respawned_from: None,
+            session_origin: None,
             resume_handle: None,
             resume_notice: None,
         });

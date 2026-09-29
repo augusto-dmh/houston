@@ -189,10 +189,20 @@ fn claude_pane(daemon: &Arc<Daemon>, dir: &Path, profile: Option<u32>) -> proto:
         .unwrap()
 }
 
-fn restored_from(sessions: &[proto::SessionInfo], old: u32) -> &proto::SessionInfo {
+/// The session that replaced `old`: the first later id in the same pane's lineage.
+fn restored_from<'a>(
+    env: &Env,
+    sessions: &'a [proto::SessionInfo],
+    old: u32,
+) -> &'a proto::SessionInfo {
+    let origin = Db::open(&env.db_path())
+        .unwrap()
+        .session_origin(old)
+        .unwrap();
     sessions
         .iter()
-        .find(|s| s.respawned_from == Some(old))
+        .filter(|s| s.id > old && s.session_origin == Some(origin))
+        .min_by_key(|s| s.id)
         .unwrap_or_else(|| panic!("session {old} was not restored: {sessions:?}"))
 }
 
@@ -362,7 +372,7 @@ fn seed_claude(env: &Env, id: u32, dir: &Path, cwd: &Path, handle: Option<(&str,
         delegation: None,
         inbox_unread: 0,
         tags: vec![],
-        respawned_from: None,
+        session_origin: None,
         resumable: false,
         resume_notice: None,
     })
@@ -386,7 +396,7 @@ async fn an_orderly_restore_resumes_each_claude_pane_in_its_own_conversation() {
     let after = reboot(&env, &daemon);
     let sessions = after.list();
     for (old, conversation) in [(a.id, &conv_a), (b.id, &conv_b)] {
-        let argv = argv_of(&env, restored_from(&sessions, old).id).await;
+        let argv = argv_of(&env, restored_from(&env, &sessions, old).id).await;
         assert_eq!(resume_of(&argv).as_ref(), Some(conversation), "{argv:?}");
         for banned in ["--session-id", "--continue", "-c"] {
             assert!(!argv.iter().any(|a| a == banned), "{banned} in {argv:?}");
@@ -476,7 +486,7 @@ async fn a_pane_that_never_had_a_turn_restores_fresh() {
     .await;
 
     let after = reboot(&env, &daemon);
-    let restored = restored_from(&after.list(), info.id).clone();
+    let restored = restored_from(&env, &after.list(), info.id).clone();
     let argv = argv_of(&env, restored.id).await;
     assert_eq!(resume_of(&argv), None, "{argv:?}");
     assert_eq!(restored.resume_notice, None);
@@ -524,7 +534,7 @@ async fn a_cleared_conversation_keeps_the_old_handle_until_its_first_turn() {
     );
 
     let after = reboot(&env, &daemon);
-    let argv = argv_of(&env, restored_from(&after.list(), info.id).id).await;
+    let argv = argv_of(&env, restored_from(&env, &after.list(), info.id).id).await;
     assert_eq!(resume_of(&argv).as_deref(), Some(cleared), "{argv:?}");
 }
 
@@ -556,7 +566,7 @@ async fn the_handle_survives_consecutive_restores() {
     clean_shutdown(&env);
 
     let first = boot(&env);
-    let once = restored_from(&first.list(), 5).clone();
+    let once = restored_from(&env, &first.list(), 5).clone();
     assert_eq!(
         resume_of(&argv_of(&env, once.id).await).as_deref(),
         Some("conv-h")
@@ -567,7 +577,7 @@ async fn the_handle_survives_consecutive_restores() {
     );
 
     let second = reboot(&env, &first);
-    let twice = restored_from(&second.list(), once.id).clone();
+    let twice = restored_from(&env, &second.list(), once.id).clone();
     assert_eq!(
         resume_of(&argv_of(&env, twice.id).await).as_deref(),
         Some("conv-h")
@@ -587,7 +597,7 @@ async fn with_restore_resume_off_every_pane_restores_fresh() {
     clean_shutdown(&env);
 
     let daemon = boot(&env);
-    let restored = restored_from(&daemon.list(), 5).clone();
+    let restored = restored_from(&env, &daemon.list(), 5).clone();
     assert_eq!(resume_of(&argv_of(&env, restored.id).await), None);
 }
 
@@ -611,7 +621,7 @@ async fn a_resumed_pane_runs_on_its_profile_config_dir() {
     let (info, conversation, _) = pane_with_a_turn(&env, &daemon, &ws, Some(profile)).await;
 
     let after = reboot(&env, &daemon);
-    let argv = argv_of(&env, restored_from(&after.list(), info.id).id).await;
+    let argv = argv_of(&env, restored_from(&env, &after.list(), info.id).id).await;
     assert_eq!(resume_of(&argv), Some(conversation), "{argv:?}");
     assert_eq!(config_dir_of(&argv), work);
 }
@@ -627,7 +637,7 @@ async fn a_deleted_profile_falls_back_naming_it() {
     daemon.agent_profile_delete(profile).unwrap();
 
     let after = reboot(&env, &daemon);
-    let restored = restored_from(&after.list(), info.id).clone();
+    let restored = restored_from(&env, &after.list(), info.id).clone();
     assert_eq!(resume_of(&argv_of(&env, restored.id).await), None);
     let notice = restored.resume_notice.expect("a fallback says why");
     assert!(notice.contains("\"work\""), "{notice}");
@@ -644,8 +654,8 @@ async fn two_panes_never_resume_the_same_conversation() {
 
     let daemon = boot(&env);
     let sessions = daemon.list();
-    let a = restored_from(&sessions, 5).clone();
-    let b = restored_from(&sessions, 6).clone();
+    let a = restored_from(&env, &sessions, 5).clone();
+    let b = restored_from(&env, &sessions, 6).clone();
     let (resumed, fresh) = match (
         resume_of(&argv_of(&env, a.id).await),
         resume_of(&argv_of(&env, b.id).await),
@@ -677,7 +687,7 @@ async fn a_missing_or_empty_transcript_falls_back_with_its_reason() {
         (5, "conv-gone", &missing, "missing"),
         (6, "conv-empty", &empty, "empty"),
     ] {
-        let restored = restored_from(&sessions, old).clone();
+        let restored = restored_from(&env, &sessions, old).clone();
         assert_eq!(resume_of(&argv_of(&env, restored.id).await), None);
         let notice = restored.resume_notice.expect("a fallback says why");
         assert!(
@@ -703,7 +713,7 @@ async fn the_transcript_check_reads_metadata_only() {
     clean_shutdown(&env);
 
     let daemon = boot(&env);
-    let restored = restored_from(&daemon.list(), 5).clone();
+    let restored = restored_from(&env, &daemon.list(), 5).clone();
     assert_eq!(
         resume_of(&argv_of(&env, restored.id).await).as_deref(),
         Some("conv-locked"),
@@ -724,7 +734,7 @@ async fn a_vanished_cwd_falls_back_with_its_path() {
     clean_shutdown(&env);
 
     let daemon = boot(&env);
-    let restored = restored_from(&daemon.list(), 5).clone();
+    let restored = restored_from(&env, &daemon.list(), 5).clone();
     assert_eq!(resume_of(&argv_of(&env, restored.id).await), None);
     let notice = restored.resume_notice.expect("a fallback says why");
     assert!(notice.contains(&sub.display().to_string()), "{notice}");
@@ -748,16 +758,16 @@ async fn a_resume_that_exits_early_relaunches_fresh_once() {
     clean_shutdown(&env);
 
     let daemon = boot(&env);
-    let resumed = restored_from(&daemon.list(), 5).clone();
+    let resumed = restored_from(&env, &daemon.list(), 5).clone();
     assert_eq!(
         resume_of(&argv_of(&env, resumed.id).await).as_deref(),
         Some("conv-rejected")
     );
     wait_for_session(&daemon, "the fresh relaunch", |s| {
-        s.respawned_from == Some(resumed.id)
+        s.id > resumed.id && s.session_origin == resumed.session_origin
     })
     .await;
-    let fallback = restored_from(&daemon.list(), resumed.id).clone();
+    let fallback = restored_from(&env, &daemon.list(), resumed.id).clone();
     assert_eq!(resume_of(&argv_of(&env, fallback.id).await), None);
     let notice = fallback
         .resume_notice
@@ -776,7 +786,7 @@ async fn a_resume_that_exits_early_relaunches_fresh_once() {
         !daemon
             .list()
             .iter()
-            .any(|s| s.respawned_from == Some(fallback.id)),
+            .any(|s| s.id > fallback.id && s.session_origin == fallback.session_origin),
         "one fallback, never a loop"
     );
 }
@@ -791,7 +801,7 @@ async fn a_resumed_cli_that_exits_cleanly_is_not_relaunched() {
     clean_shutdown(&env);
 
     let daemon = boot(&env);
-    let resumed = restored_from(&daemon.list(), 5).clone();
+    let resumed = restored_from(&env, &daemon.list(), 5).clone();
     assert_eq!(
         resume_of(&argv_of(&env, resumed.id).await).as_deref(),
         Some("conv-quit")
@@ -802,7 +812,7 @@ async fn a_resumed_cli_that_exits_cleanly_is_not_relaunched() {
         !daemon
             .list()
             .iter()
-            .any(|s| s.respawned_from == Some(resumed.id)),
+            .any(|s| s.id > resumed.id && s.session_origin == resumed.session_origin),
         "a clean exit is the user's"
     );
 }
@@ -848,7 +858,7 @@ async fn a_provider_without_resume_gets_no_handle() {
     assert_eq!(handle_in(&env, info.id), None);
 
     let after = reboot(&env, &daemon);
-    let restored = restored_from(&after.list(), info.id).clone();
+    let restored = restored_from(&env, &after.list(), info.id).clone();
     let argv = argv_of(&env, restored.id).await;
     assert!(
         !argv.iter().any(|a| a == "resume" || a == "--resume"),
@@ -1087,7 +1097,7 @@ async fn routine_and_harness_panes_never_resume() {
     let after = reboot(&env, &daemon);
     let sessions = after.list();
     for pane in panes {
-        let restored = restored_from(&sessions, pane);
+        let restored = restored_from(&env, &sessions, pane);
         assert_eq!(resume_of(&argv_of(&env, restored.id).await), None);
     }
 }
@@ -1101,7 +1111,7 @@ async fn a_resumed_pane_keeps_its_id_through_a_resume_hook() {
     clean_shutdown(&env);
 
     let daemon = boot(&env);
-    let restored = restored_from(&daemon.list(), 5).clone();
+    let restored = restored_from(&env, &daemon.list(), 5).clone();
     assert_eq!(native_in(&env, restored.id).as_deref(), Some("conv-r"));
     hook(
         &env,

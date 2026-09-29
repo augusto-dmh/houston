@@ -47,6 +47,7 @@ import {
   syncTree,
   syncWorkspaceGrids,
   respawnedSessions,
+  syncSessionLayout,
   unstack,
   updateBrowserUrl,
   type BrowserNode,
@@ -276,9 +277,9 @@ describe('syncWorkspaceGrids across a respawn', () => {
     const other = row(stackPane([leaf(4), leaf(5)], 1, 'st'), leaf(6))
     const replaced = respawnedSessions([
       { id: 1 },
-      { id: 11, respawned_from: 2 },
+      { id: 11, session_origin: 2 },
       { id: 3 },
-      { id: 14, respawned_from: 4 },
+      { id: 14, session_origin: 4 },
       { id: 5 },
       { id: 6 }
     ])
@@ -297,10 +298,53 @@ describe('syncWorkspaceGrids across a respawn', () => {
     const out = synced(
       layouts(row(leaf(1), leaf(2)), leaf(6)),
       [1, 2, 6, 11],
-      respawnedSessions([{ id: 11, respawned_from: 2 }])
+      respawnedSessions([{ id: 1 }, { id: 6 }, { id: 11, session_origin: 2 }])
     )
     expect(preorderSessions(out.active)).toEqual([1, 11])
     expect(preorderSessions(out.other)).toEqual([6])
+  })
+
+  it('keeps an inactive stacked pane after replacements the client never observed', () => {
+    const current = layouts(leaf(1), row(stackPane([leaf(2), leaf(3)], 1, 'st'), leaf(4)))
+    const out = synced(current, [1, 3, 4, 12], respawnedSessions([
+      { id: 1 }, { id: 3 }, { id: 4 }, { id: 12, session_origin: 2 }
+    ]))
+    expect(preorderSessions(out.active)).toEqual([1])
+    expect(preorderSessions(out.other)).toEqual([12, 3, 4])
+    expect(sessionPaneIds(out.other).get(12)).toBe('p2')
+    expect(findStackContaining(out.other!, 12)?.activeIndex).toBe(1)
+  })
+
+  it('removes an intermediate retired row when the latest replacement is listed', () => {
+    const current = layouts(leaf(1), { ...leaf(11), id: 'p2', session_origin: 2 })
+    const out = synced(current, [1, 11, 13], respawnedSessions([
+      { id: 13, session_origin: 2 }, { id: 1 }, { id: 11, session_origin: 2 }
+    ]))
+    expect(preorderSessions(out.active)).toEqual([1])
+    expect(preorderSessions(out.other)).toEqual([13])
+    expect(sessionPaneIds(out.other).get(13)).toBe('p2')
+  })
+
+  it('keeps origins in the All layout after changing density', () => {
+    const replaced = respawnedSessions([{ id: 1 }, { id: 11, session_origin: 2 }])
+    const first = syncSessionLayout(row(leaf(2), leaf(1)), [1, 11], 2, replaced)
+    saveLayout('all', { tree: regrid(first, [11, 1], 1), cols: 1 })
+    const loaded = loadLayout('all')
+    const next = syncSessionLayout(loaded.tree, [1, 13], loaded.cols,
+      respawnedSessions([{ id: 1 }, { id: 13, session_origin: 2 }]))
+    expect(preorderSessions(next)).toEqual([13, 1])
+    expect(sessionPaneIds(next).get(13)).toBe('p2')
+  })
+
+  it('keeps the saved origin after observing an intermediate replacement', () => {
+    const first = syncWorkspaceGrids(ws, grids, 'g-active', [1, 11],
+      layouts(leaf(1), leaf(2)), respawnedSessions([{ id: 1 }, { id: 11, session_origin: 2 }]))
+    for (const [key, state] of first) saveLayout(key, state)
+    const second = syncWorkspaceGrids(ws, grids, 'g-active', [1, 13], new Map(),
+      respawnedSessions([{ id: 1 }, { id: 13, session_origin: 2 }]))
+    const other = second.get(gridStorageKey(ws, 'g-other'))!.tree
+    expect(preorderSessions(other)).toEqual([13])
+    expect(sessionPaneIds(other).get(13)).toBe('p2')
   })
 })
 
