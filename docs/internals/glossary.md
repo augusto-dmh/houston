@@ -24,6 +24,7 @@ named.
 | **workspace** | A project directory the daemon knows. Sessions belong to one; hooks are installed per workspace. `workspace_id` on the wire and in `pane_inbox` is the workspace's own path — Houston's only workspace key, so no separate id table can drift from it. | `db.rs::workspaces` |
 | **checkout** | The working tree at one `toplevel`: a workspace directory, or a linked worktree of one. Two panes in one checkout share a branch move; a main checkout and its worktree are separate checkouts of one repository (equal `common_dir`). A worktree is a separate checkout, never the same workspace. | `git.rs::checkout_facts` |
 | **grid** | A named layout under a workspace holding a split tree. Renderer state only (`tr-grids:<path>`, `tr-layout:<path>::<gridId>`). | `layout/tree.ts::GridMeta` |
+| **tag** | A named colour from `TAG_PALETTE`, in the daemon's tag registry. A **pane tag** is on the session (`SessionInfo.tags`, daemon state); a **grid tag** is on `GridMeta.tags` (renderer state). Neither is derived from the other. Tag ids are reused after a delete, so a deleted id is removed from every grid. | `db.rs::tags`, `layout/tree.ts::GridMeta` |
 | **stack** | A tabbed group of panes in one grid slot, capped at 4. | `StackTabs.tsx` |
 | **codename** | A pane's auto-generated name, from a fixed pool, replaced by a better name as one arrives. | `pane_name.rs` |
 | **title source** | Where a pane's current name came from — codename, first prompt, the CLI's own window title, or the user. A weaker source never overwrites a stronger one. | `daemon.rs`, `osc_title.rs` |
@@ -45,6 +46,7 @@ named.
 | **finding** | One entry of a harness review's `findings.json`: a problem with its evidence (sessions, count, short quotes), a target file, a recommended change and how to enforce it. Houston never applies one itself. | `harness_review_prompt.txt` |
 | **ledger** | The record of findings across harness reviews, with a state per finding (new, applied, dismissed, deferred) so a dismissed finding does not return without new evidence. Not built yet: today a review reads the previous run's `findings.json` from `.houston/harness/`. | — |
 | **handoff** | Giving a pane's conversation to a DIFFERENT CLI: the packet (the pane's thread plus the operator's ask) a new pane is launched with. | `PaneHandoff.tsx`, `handoffPacket.ts` |
+| **handoff pane** | A pane an agent opens with `pane_spawn{handoff: true}`: top-level, with no parent or delegation, so the caller closes without the live-children guard. Refused from a child. | `daemon.rs::orchestrate_handoff` |
 | **handoff document** | The older, generative form: a budgeted prompt assembled from a pane's command blocks, written by a hidden CLI session. Wire and daemon only — no UI door. | `handoff.rs` |
 
 ## Runtime nouns
