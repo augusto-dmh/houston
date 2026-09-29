@@ -1641,6 +1641,7 @@ struct SpawnParams {
     wrap: Option<Vec<String>>,
     acp: Option<String>,
     profile_label: Option<String>,
+    respawned_from: Option<u32>,
 }
 
 type ProfileSpawnEnv = (Option<(String, String)>, Option<String>);
@@ -3337,6 +3338,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: m.tags.clone(),
+            respawned_from: None,
         };
         let vt = adopted_emulator(m);
         Arc::new(Session {
@@ -6254,6 +6256,7 @@ impl Daemon {
             acp: p.acp,
             profile_label,
             tags: Vec::new(),
+            respawned_from: None,
         })?;
         self.record_approval_mode(info.id, approval);
         Ok(info)
@@ -6643,6 +6646,7 @@ impl Daemon {
             acp,
             profile_label,
             tags: old_tags,
+            respawned_from: Some(old_id),
         })?;
 
         if was_dead {
@@ -6894,6 +6898,7 @@ impl Daemon {
             wrap,
             acp,
             profile_label,
+            respawned_from,
         } = p;
         let pty = native_pty_system();
         let pair = pty
@@ -7131,6 +7136,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: p_tags.clone(),
+            respawned_from,
         };
 
         let session = Arc::new(Session {
@@ -7492,6 +7498,7 @@ impl Daemon {
             delegation: None,
             inbox_unread: 0,
             tags: Vec::new(),
+            respawned_from: None,
         };
         let session = Arc::new(Session {
             info: info.clone(),
@@ -8803,6 +8810,7 @@ impl Daemon {
             acp: None,
             profile_label: None,
             tags: Vec::new(),
+            respawned_from: None,
         });
         if let Err(e) = spawned {
             self.handoff_jobs
@@ -12228,6 +12236,7 @@ impl Daemon {
             acp: None,
             profile_label,
             tags: Vec::new(),
+            respawned_from: None,
         });
         let info = spawned?;
         self.record_approval_mode(sid, requested_mode);

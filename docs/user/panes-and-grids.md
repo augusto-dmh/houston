@@ -101,5 +101,8 @@ There is no undo for a killed session; the pane is gone from the grid along with
 
 Settings ▸ Workspaces ▸ Close idle background sessions can end sessions that have sat
 idle in the background, after the "Idle for" duration you set. Settings ▸ Workspaces ▸
-Restore budget caps how many sessions Houston brings back automatically when you reopen
-a workspace, rather than restoring every session that was ever open in it.
+Restore budget caps how many sessions Houston brings back automatically when it starts
+again after a clean shutdown, rather than restoring every session that was open.
+
+A restored session, or one you restart from its pane, starts a fresh agent in the same
+cell it left: the same grid, split and stack, whichever grid is active.

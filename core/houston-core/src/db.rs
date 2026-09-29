@@ -1821,6 +1821,7 @@ impl Db {
                             );
                             Vec::new()
                         }),
+                    respawned_from: None,
                 }),
                 Err(_) => tracing::warn!(
                     "session {id} has unknown agent {agent:?} in the db; not restoring it"
@@ -4665,6 +4666,7 @@ mod tests {
             delegation: None,
             inbox_unread: 0,
             tags: vec![],
+            respawned_from: None,
         }
     }
 

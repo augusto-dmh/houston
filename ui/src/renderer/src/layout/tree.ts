@@ -830,18 +830,47 @@ export function removeGrid(path: string, gridId: string): GridMeta[] {
   return next
 }
 
+// Old id -> the id `respawn` replaced it with, from `SessionInfo.respawned_from`.
+export function respawnedSessions(
+  sessions: Iterable<{ id: number; respawned_from?: number | null }>
+): Map<number, number> {
+  const replaced = new Map<number, number>()
+  for (const s of sessions) if (s.respawned_from != null) replaced.set(s.respawned_from, s.id)
+  return replaced
+}
+
+// A replacement takes over the retired session's pane in every grid of the
+// workspace, unless some grid already shows the replacement.
+function reviveReplaced(
+  loaded: { state: LayoutState }[],
+  replaced: ReadonlyMap<number, number>
+): void {
+  const assigned = new Set(loaded.flatMap(({ state }) => preorderSessions(state.tree)))
+  for (const [old, next] of replaced) {
+    if (!assigned.has(old) || assigned.has(next)) continue
+    for (const entry of loaded) {
+      const pane = sessionPaneIds(entry.state.tree).get(old)
+      const tree = pane === undefined ? null : reviveLeaf(entry.state.tree, pane, next)
+      if (tree) entry.state = { ...entry.state, tree }
+    }
+  }
+}
+
 export function syncWorkspaceGrids(
   path: string,
   grids: GridMeta[],
   activeGrid: string,
   wsAliveIds: number[],
-  current: Map<string, LayoutState>
+  current: Map<string, LayoutState>,
+  replaced: ReadonlyMap<number, number> = new Map()
 ): Map<string, LayoutState> {
-  const wsAlive = new Set(wsAliveIds)
+  const alive = wsAliveIds.filter((id) => !replaced.has(id))
+  const wsAlive = new Set(alive)
   const loaded = grids.map((g) => {
     const key = gridStorageKey(path, g.id)
     return { gridId: g.id, key, state: current.get(key) ?? loadLayout(key) }
   })
+  reviveReplaced(loaded, replaced)
   const allAssigned = new Set(loaded.flatMap(({ state }) => preorderSessions(state.tree)))
   const next = new Map<string, LayoutState>()
   for (const { gridId, key, state } of loaded) {
@@ -849,7 +878,7 @@ export function syncWorkspaceGrids(
     const ownSet = new Set(own)
     const ids = own.filter((id) => wsAlive.has(id))
     if (gridId === activeGrid) {
-      for (const id of wsAliveIds) if (!ownSet.has(id) && !allAssigned.has(id)) ids.push(id)
+      for (const id of alive) if (!ownSet.has(id) && !allAssigned.has(id)) ids.push(id)
     }
     const tree = syncTree(state.tree, ids, state.cols)
     next.set(key, { ...state, tree })

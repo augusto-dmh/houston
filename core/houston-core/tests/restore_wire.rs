@@ -41,6 +41,7 @@ fn seed(state_dir: &std::path::Path, dirs: &[&std::path::Path], clean: bool) {
             delegation: None,
             inbox_unread: 0,
             tags: vec![],
+            respawned_from: None,
         })
         .unwrap();
     }
@@ -80,6 +81,7 @@ fn seed_one(
         delegation: None,
         inbox_unread: 0,
         tags: vec![],
+        respawned_from: None,
     })
     .unwrap();
 }
@@ -189,6 +191,7 @@ fn invalid_cwd_is_deferred_not_respawned() {
         delegation: None,
         inbox_unread: 0,
         tags: vec![],
+        respawned_from: None,
     })
     .unwrap();
     drop(db);
@@ -356,6 +359,7 @@ fn no_flags_set_runs_normal_restore_policy() {
         delegation: None,
         inbox_unread: 0,
         tags: vec![],
+        respawned_from: None,
     })
     .unwrap();
     drop(db);
@@ -470,6 +474,31 @@ fn an_agent_husk_comes_back_live_and_never_as_a_corpse() {
     );
     let r = recovery.expect("recovery summary present");
     assert_eq!((r.respawned, r.deferred, r.crashed), (1, 0, false));
+}
+
+#[test]
+fn a_restored_session_names_the_husk_it_replaced() {
+    let _env = env_lock();
+    std::env::set_var("SHELL", "/bin/sh");
+    std::env::remove_var("HOUSTON_RESTORE_BUDGET");
+    std::env::remove_var("HOUSTON_SAFE_MODE");
+
+    let state = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    seed_one(state.path(), 7, proj.path(), proto::AgentKind::Shell, None);
+    std::fs::write(state.path().join("clean-shutdown"), b"").unwrap();
+
+    let (sessions, _) = boot_and_list(state.path());
+    let restored = sessions
+        .iter()
+        .find(|s| s.title == "Husk-7")
+        .expect("the restored pane is listed");
+    assert_ne!(restored.id, 7, "respawn mints a new id: {restored:?}");
+    assert_eq!(
+        restored.respawned_from,
+        Some(7),
+        "a client needs the retired id to keep the pane's grid slot: {restored:?}"
+    );
 }
 
 #[test]

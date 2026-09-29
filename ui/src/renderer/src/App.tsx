@@ -256,6 +256,7 @@ import {
   swapLeaf,
   syncTree,
   syncWorkspaceGrids,
+  respawnedSessions,
   unstack,
   updateBrowserUrl,
   type BrowserNode,
@@ -323,8 +324,8 @@ export { isTitlebarDragEligible, isBareTitlebarTarget };
 const SELECTED_WS_KEY = "tr-selected-workspace";
 
 // { [workspacePath]: paneId } — the DURABLE pane id, never a session id:
-// `respawn` retires the old session for a fresh one on every resume, so a
-// stored session id would name nothing by the next boot.
+// `respawn` gives the pane a new session id on every restart and boot
+// restore, so a stored session id would name nothing by the next boot.
 const FOCUSED_PANE_KEY = "tr-focused-pane";
 
 function readFocusedPanes(): Record<string, string> {
@@ -1485,6 +1486,11 @@ export function App(): React.JSX.Element {
     }
   }, [conn]);
 
+  const replacedSessions = useMemo(
+    () => respawnedSessions(sessions.values()),
+    [sessions],
+  );
+
   const warmLayouts = useMemo(() => {
     const map = new Map<string, LayoutState>();
     for (const w of orderedWorkspaces) {
@@ -1500,6 +1506,7 @@ export function App(): React.JSX.Element {
         active,
         wsSessionIds,
         layouts,
+        replacedSessions,
       );
       for (const [key, st] of synced) map.set(key, st);
     }
@@ -1508,6 +1515,7 @@ export function App(): React.JSX.Element {
     orderedWorkspaces,
     layouts,
     sessions,
+    replacedSessions,
     gridsFor,
     activeGridId,
   ]);
@@ -1631,6 +1639,7 @@ export function App(): React.JSX.Element {
           active,
           wsSessionIds,
           prev,
+          replacedSessions,
         );
         for (const [key, st] of synced) {
           next.set(key, st);
@@ -1639,7 +1648,14 @@ export function App(): React.JSX.Element {
       }
       return changed ? next : prev;
     });
-  }, [gridSyncKey, workspaces, sessions, gridsFor, activeGridId]);
+  }, [
+    gridSyncKey,
+    workspaces,
+    sessions,
+    replacedSessions,
+    gridsFor,
+    activeGridId,
+  ]);
 
   useEffect(() => {
     if (conn.kind !== "ready") return;

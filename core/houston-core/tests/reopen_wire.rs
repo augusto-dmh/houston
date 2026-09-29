@@ -265,6 +265,7 @@ async fn respawn_refuses_a_swarm_tied_session() {
             delegation: None,
             inbox_unread: 0,
             tags: vec![],
+            respawned_from: None,
         })
         .unwrap();
         let roster = vec![proto::SwarmRosterEntry {
@@ -329,6 +330,10 @@ async fn force_restarts_a_live_session_that_a_plain_respawn_refuses() {
     let fresh = daemon.respawn(live_id, false, None, None, true).unwrap();
     assert_ne!(fresh.id, live_id);
     assert_eq!(fresh.agent, proto::AgentKind::Custom);
+    assert_eq!(fresh.respawned_from, Some(live_id));
+    let listed = daemon.list();
+    let listed = listed.iter().find(|s| s.id == fresh.id).unwrap();
+    assert_eq!(listed.respawned_from, Some(live_id), "{listed:?}");
 
     daemon.kill(fresh.id).ok();
 }
