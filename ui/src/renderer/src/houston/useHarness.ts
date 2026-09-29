@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { HoustonClient } from './client'
 import type { HarnessFinding } from './generated/HarnessFinding'
 import type { HarnessReview } from './generated/HarnessReview'
+import type { HarnessModelOption } from './generated/HarnessModelOption'
 import type { Routine } from './generated/Routine'
 
 export interface HarnessState {
@@ -9,6 +10,7 @@ export interface HarnessState {
   routine: Routine | null
   reviews: HarnessReview[]
   findings: HarnessFinding[]
+  models: HarnessModelOption[]
 }
 
 export interface HarnessReport {
@@ -40,7 +42,8 @@ export function useHarness(
         workspace: msg.workspace,
         routine: msg.routine ?? null,
         reviews: msg.reviews,
-        findings: msg.findings
+        findings: msg.findings,
+        models: msg.models
       })
     })
     const offChanged = client.subscribe('harness_changed', (msg) => {

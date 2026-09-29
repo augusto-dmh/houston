@@ -47,6 +47,7 @@ impl Daemon {
             routine,
             reviews,
             findings: self.harness_findings(workspace)?,
+            models: self.model_catalog.model_options(),
         })
     }
 

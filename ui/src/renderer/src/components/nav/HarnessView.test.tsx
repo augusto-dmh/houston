@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { HoustonClient } from '../../houston/client'
 import type { ServerMsg } from '../../houston/generated/ServerMsg'
 import { HarnessView } from './HarnessView'
+import { pickOption } from '../../test/selectHarness'
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const WS = '/home/dev/proj'
@@ -86,6 +87,7 @@ describe('HarnessView', () => {
     render(asClient)
     emit({
       type: 'harness_state',
+      models: [],
       workspace: WS,
       routine: null,
       reviews: [],
@@ -106,11 +108,28 @@ describe('HarnessView', () => {
     })
   })
 
+  it('uses models delivered by the daemon when creating a review', () => {
+    const { client, emit, asClient } = fakeClient()
+    render(asClient)
+    emit({
+      type: 'harness_state', workspace: WS, routine: null, reviews: [], findings: [],
+      models: [{ provider: 'codex', id: 'gpt-catalog-model' }]
+    })
+    pickOption(container, 'harness-provider', 'codex')
+    pickOption(container, 'harness-model', 'gpt-catalog-model')
+    act(() => Array.from(container.querySelectorAll('button'))
+      .find((button) => button.textContent === 'Run first review')!.click())
+    expect(client.harnessRoutineCreate).toHaveBeenCalledWith(expect.objectContaining({
+      engine: 'codex', model: 'gpt-catalog-model'
+    }))
+  })
+
   it('a decision is sent for the reviewed workspace', () => {
     const { client, emit, asClient } = fakeClient()
     render(asClient)
     emit({
       type: 'harness_state',
+      models: [],
       workspace: WS,
       routine: {
         id: 7,

@@ -93,6 +93,51 @@ fn state(
     }
 }
 
+#[test]
+fn harness_state_returns_native_models_from_the_cached_catalog() {
+    let state = tempfile::tempdir().unwrap();
+    let cache = json!({
+        "fetched_at_ms": 1,
+        "source": houston_core::model_catalog::CATALOG_URL,
+        "document": {
+            "claude-sonnet-5": {"litellm_provider": "anthropic", "mode": "chat", "max_input_tokens": 200_000},
+            "gpt-5-codex": {"litellm_provider": "openai", "mode": "responses", "max_input_tokens": 200_000},
+            "bedrock/anthropic.claude-sonnet-5": {"litellm_provider": "bedrock", "mode": "chat"},
+            "text-embedding-3-large": {"litellm_provider": "openai", "mode": "embedding"}
+        }
+    });
+    std::fs::create_dir_all(state.path().join("usage")).unwrap();
+    std::fs::write(
+        houston_core::model_catalog::cache_path(state.path()),
+        cache.to_string(),
+    )
+    .unwrap();
+    let daemon = Daemon::new(houston_core::daemon::DaemonConfig {
+        token: "test-token".into(),
+        db_path: state.path().join("test.db"),
+    })
+    .unwrap();
+
+    let proto::ServerMsg::HarnessState { models, .. } =
+        daemon.harness_state("/tmp/project").unwrap()
+    else {
+        panic!("harness_state answers HarnessState");
+    };
+    assert_eq!(
+        models,
+        vec![
+            proto::HarnessModelOption {
+                provider: proto::AgentKind::Claude,
+                id: "claude-sonnet-5".into(),
+            },
+            proto::HarnessModelOption {
+                provider: proto::AgentKind::Codex,
+                id: "gpt-5-codex".into(),
+            },
+        ]
+    );
+}
+
 fn plain_pane(daemon: &Arc<Daemon>, ws: &Path) -> u32 {
     daemon
         .create_session(CreateParams {

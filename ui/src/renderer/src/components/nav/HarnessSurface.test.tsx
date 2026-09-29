@@ -6,7 +6,7 @@ import type { HarnessFinding } from '../../houston/generated/HarnessFinding'
 import type { HarnessReview } from '../../houston/generated/HarnessReview'
 import type { Routine } from '../../houston/generated/Routine'
 import type { HarnessState } from '../../houston/useHarness'
-import { pickOption } from '../../test/selectHarness'
+import { pickOption, selectOptionLabels } from '../../test/selectHarness'
 import { HarnessSurface, type HarnessSurfaceProps } from './HarnessSurface'
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -79,6 +79,7 @@ function harnessState(overrides: Partial<HarnessState> = {}): HarnessState {
   return {
     workspace: WS,
     routine: routine(),
+    models: [{ provider: 'claude', id: 'claude-sonnet-test' }, { provider: 'codex', id: 'gpt-test' }],
     reviews: [review()],
     findings: [
       finding(),
@@ -165,17 +166,12 @@ describe('HarnessSurface', () => {
       'permission denials with secrets masked'
     )
     pickOption(container, 'harness-provider', 'codex')
-    act(() => {
-      const model = container.querySelector<HTMLInputElement>('#harness-model')!
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
-      setter.call(model, 'gpt-5.5')
-      model.dispatchEvent(new Event('input', { bubbles: true }))
-    })
+    pickOption(container, 'harness-model', 'gpt-test')
     click(button('Mondays 09:00'))
     click(button('Run first review'))
     expect(props.onCreateRoutine).toHaveBeenCalledWith({
       engine: 'codex',
-      model: 'gpt-5.5',
+      model: 'gpt-test',
       cadence: { type: 'clock', hour: 9, minute: 0, weekdays: [2] },
       enabled: true
     })
@@ -186,6 +182,24 @@ describe('HarnessSurface', () => {
     expect(props.onRunNow).toHaveBeenCalledWith(9)
     render({ state: harnessState({ routine: routine({ id: 9 }), reviews: [], findings: [] }) })
     expect(props.onRunNow).toHaveBeenCalledTimes(1)
+  })
+
+  it('filters catalog models by provider and resets the model when the provider changes', () => {
+    render({ state: harnessState({ routine: null }) })
+    pickOption(container, 'harness-model', 'claude-sonnet-test')
+    pickOption(container, 'harness-provider', 'codex')
+    const options = selectOptionLabels(container, 'harness-model')
+    expect(options).toContain('gpt-test')
+    expect(options).not.toContain('claude-sonnet-test')
+    expect(container.querySelector('[data-testid="harness-model"]')?.textContent).toContain("The provider's default")
+  })
+
+  it('keeps an existing model when it is absent from the current catalog', () => {
+    render({ state: harnessState({ routine: routine({ model: 'claude-custom' }), models: [] }) })
+    click(button('Schedule'))
+    expect(container.querySelector('[data-testid="harness-model"]')?.textContent).toContain('claude-custom')
+    click(button('Save schedule'))
+    expect(props.onUpdateRoutine).toHaveBeenCalledWith(expect.objectContaining({ model: 'claude-custom' }))
   })
 
   it('a running review disables Run review and names why', () => {

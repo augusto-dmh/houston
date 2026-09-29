@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { AgentKind } from '../../houston/generated/AgentKind'
 import type { Cadence } from '../../houston/generated/Cadence'
 import type { HarnessFindingState } from '../../houston/generated/HarnessFindingState'
+import type { HarnessModelOption } from '../../houston/generated/HarnessModelOption'
 import type { Routine } from '../../houston/generated/Routine'
 import type { RoutineMutation } from '../../houston/routineTypes'
 import type { HarnessReport, HarnessState } from '../../houston/useHarness'
@@ -150,6 +151,7 @@ export function HarnessSurface(props: HarnessSurfaceProps): React.JSX.Element {
             </p>
           ) : !state.routine ? (
             <FirstRun
+              models={state.models}
               onStart={(v) => {
                 pendingRun.current = workspace
                 props.onCreateRoutine(v)
@@ -171,6 +173,7 @@ function SchedulePanel(
   return (
     <div className={`${BLOCK} p-[14px]`} data-testid="harness-schedule">
       <SetupFields
+        models={props.state?.models ?? []}
         initial={{
           engine: routine.engine,
           model: routine.model ?? null,
@@ -195,7 +198,13 @@ function SchedulePanel(
   )
 }
 
-function FirstRun({ onStart }: { onStart: (setup: HarnessSetupValue) => void }): React.JSX.Element {
+function FirstRun({
+  onStart,
+  models
+}: {
+  onStart: (setup: HarnessSetupValue) => void
+  models: HarnessModelOption[]
+}): React.JSX.Element {
   return (
     <div className="flex flex-col gap-[14px]" data-testid="harness-first-run">
       <p className={TEXT_CLS}>
@@ -205,6 +214,7 @@ function FirstRun({ onStart }: { onStart: (setup: HarnessSetupValue) => void }):
       <WhatARunSends />
       <div className={`${BLOCK} p-[14px]`}>
         <SetupFields
+          models={models}
           initial={{
             engine: 'claude',
             model: null,
@@ -244,11 +254,13 @@ function WhatARunSends(): React.JSX.Element {
 }
 
 function SetupFields({
+  models,
   initial,
   submitLabel,
   onSubmit,
   onCancel
 }: {
+  models: HarnessModelOption[]
   initial: {
     engine: AgentKind
     model: string | null
@@ -262,6 +274,15 @@ function SetupFields({
   const [engine, setEngine] = useState<AgentKind>(initial.engine)
   const [model, setModel] = useState(initial.model ?? '')
   const [schedule, setSchedule] = useState<HarnessSchedule>(initial.schedule)
+  const catalogProvider = engine === 'claude' || engine === 'codex'
+  const availableModels = models.filter((entry) => entry.provider === engine)
+  const modelOptions = [
+    { value: '', label: "The provider's default" },
+    ...availableModels.map(({ id }) => ({ value: id, label: id })),
+    ...(model && !availableModels.some(({ id }) => id === model)
+      ? [{ value: model, label: `${model} (saved)` }]
+      : [])
+  ]
   return (
     <form
       className="flex flex-col gap-[12px]"
@@ -274,12 +295,13 @@ function SetupFields({
         onSubmit({ engine, model: model.trim() || null, ...fields })
       }}
     >
-      <div className="flex flex-wrap gap-[12px]">
-        <div className="flex flex-col">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-[12px]">
+        <div className="flex flex-col min-w-0">
           <span className={FIELD_LABEL}>Provider</span>
           <Select
             aria-label="Provider"
             data-testid="harness-provider"
+            className="w-full"
             value={engine}
             options={HARNESS_ENGINES.map((k) => ({
               value: k,
@@ -291,20 +313,35 @@ function SetupFields({
             }}
           />
         </div>
-        <div className="flex flex-col min-w-[220px]">
-          <label className={FIELD_LABEL} htmlFor="harness-model">
-            Model
-          </label>
-          <input
-            id="harness-model"
-            className={FIELD_INPUT}
-            autoComplete="off"
-            value={model}
-            placeholder="The provider's default"
-            onChange={(e) => setModel(e.target.value)}
-          />
+        <div className="flex flex-col min-w-0">
+          <span className={FIELD_LABEL}>Model</span>
+          {catalogProvider ? (
+            <Select
+              aria-label="Model"
+              data-testid="harness-model"
+              className="w-full"
+              value={model}
+              options={modelOptions}
+              onChange={setModel}
+            />
+          ) : (
+            <input
+              aria-label="Model"
+              id="harness-model"
+              className={`${FIELD_INPUT} w-full`}
+              autoComplete="off"
+              value={model}
+              placeholder="The provider's default"
+              onChange={(e) => setModel(e.target.value)}
+            />
+          )}
         </div>
       </div>
+      {catalogProvider && (
+        <p className={TEXT_CLS}>
+          Models come from Houston's shared catalog. Availability depends on your provider account.
+        </p>
+      )}
       <div className="flex flex-col">
         <span className={FIELD_LABEL}>Schedule</span>
         <div className="flex flex-col gap-[6px]">

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump once per wire-touching batch (`/ws` only); several PRs may land
 /// under one coordinated bump instead of each incrementing it.
-pub const PROTOCOL_VERSION: u32 = 116;
+pub const PROTOCOL_VERSION: u32 = 117;
 
 pub const VOICE_LEVEL_INTERVAL_MS: u64 = 50;
 
@@ -355,6 +355,14 @@ pub struct HarnessReview {
     pub summary: Option<String>,
     #[cfg_attr(feature = "ts-gen", ts(optional = nullable, type = "string | null"))]
     pub error: Option<String>,
+}
+
+/// A model from the local model catalog that can be selected for a Harness review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-gen", derive(ts_rs::TS), ts(export))]
+pub struct HarnessModelOption {
+    pub provider: AgentKind,
+    pub id: String,
 }
 
 /// The operator's decision on a finding, kept per workspace and finding key so
@@ -3253,6 +3261,7 @@ pub enum ServerMsg {
         routine: Option<Routine>,
         reviews: Vec<HarnessReview>,
         findings: Vec<HarnessFinding>,
+        models: Vec<HarnessModelOption>,
     },
     HarnessReport {
         #[cfg_attr(feature = "ts-gen", ts(type = "number"))]

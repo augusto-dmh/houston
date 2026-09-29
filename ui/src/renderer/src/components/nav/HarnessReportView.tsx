@@ -69,7 +69,7 @@ export function HarnessReportView({
           data-testid="harness-report"
           className="rounded-[var(--tr-radius-md)] border border-[var(--border)] bg-[var(--card-bg)] p-[16px]"
         >
-          <MarkdownPreview source={shown.markdown} />
+          <MarkdownPreview source={shown.markdown} variant="chat" />
         </div>
       ) : (
         <NavDetailState title="Loading the report" detail={`Reading ${dir}/report.md`} />

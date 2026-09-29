@@ -32,6 +32,10 @@ review**. Afterwards, **Run review** starts a run now and **Schedule** changes t
 model and schedule. Every run spends tokens, so a review runs only when you press the button
 or after you choose a schedule.
 
+For Claude and Codex, model choices use Houston's local model catalog, shared with Usage and
+context estimates. The list describes model metadata and does not indicate which models your
+account can use.
+
 The first run reads the last 14 days; each later run reads from where the previous one
 stopped, never less than 7 days nor more than 30. Sessions older than your CLI keeps
 (`cleanupPeriodDays` in `~/.claude/settings.json` for Claude Code) cannot be read, and the

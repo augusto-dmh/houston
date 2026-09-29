@@ -1,4 +1,4 @@
-# Wire protocol v116
+# Wire protocol v117
 
 Transport: one WebSocket at `ws://127.0.0.1:<port>/ws`, served by the daemon
 (`core/houston-core/src/server.rs`). Auth: a bearer token in the first message —
@@ -380,7 +380,7 @@ failure not given a typed refusal comes back as `error`.
 | `routine_refused` | `id?` (`null` for a refused create), `kind: RoutineErrorKind`, `limit?`, `requested?` | direct reply only; nothing changed |
 | `routine_runs` | `runs: RoutineRun[]` | direct reply to `routine_runs` |
 | `routine_run_event` | `run: RoutineRun` | bcast — one run changed state: opened, refused before it spawned, or ended with an outcome |
-| `harness_state` | `workspace`, `routine?: Routine`, `reviews: HarnessReview[]` (newest first, at most `HARNESS_REVIEWS_PAGE`), `findings: HarnessFinding[]` (one per key, from the newest review that raised it) | direct reply to `harness_state` |
+| `harness_state` | `workspace`, `routine?: Routine`, `reviews: HarnessReview[]` (newest first, at most `HARNESS_REVIEWS_PAGE`), `findings: HarnessFinding[]` (one per key, from the newest review that raised it), `models: HarnessModelOption[]` (native Anthropic chat and OpenAI chat/Responses models in the local model catalog; not account availability) | direct reply to `harness_state` |
 | `harness_report` | `review_id`, `markdown`, `truncated` (the file passed `HARNESS_REPORT_MAX_BYTES`) | direct reply to `harness_report` |
 | `harness_changed` | `workspace` | bcast — a review of that workspace started, published or failed, or a decision changed; a client showing it asks for `harness_state` again |
 | `voice_settings` | `settings: VoiceSettings`, `cloud_key_present`, `keyring_error?`, `models: VoiceModelState[]` | direct reply to `voice_settings_get`; bcast after any settings or key change |
@@ -540,6 +540,7 @@ HarnessReview      id, workspace, routine_id, run_id, session_id?, status: Harne
                    window?: [since, until], sessions?, prompts?, cost_usd?, finding_count,
                    summary?, error?
 HarnessReviewStatus running | published | failed (the run ended without publishing)
+HarnessModelOption provider: AgentKind (Claude or Codex), id (native model id)
 HarnessFinding     review_id, key, title, category, confidence, sessions, count, quotes,
                    recommendation_kind, target, recommendation, apply_prompt,
                    state: HarnessFindingState, decided_at_ms?,
@@ -863,6 +864,7 @@ Only the current window; older bumps live in git history.
 | Version | What changed |
 |---|---|
 | 116 | **Harness review results have their own view.** New `harness_state`, `harness_routine_create`, `harness_report` and `harness_decide` client messages and `harness_state`, `harness_report` and `harness_changed` replies, with `HarnessReview`, `HarnessReviewStatus`, `HarnessFinding` and `HarnessFindingState`. A review run publishes with the `harness_publish` MCP tool or `hs-harness publish`, offered only to its own pane, instead of `pane_submit` to the operator's inbox; the daemon stores the run, its findings and the operator's decisions per workspace. No existing message changes |
+| 117 | `harness_state` adds `models: HarnessModelOption[]`, sourced from the shared local model catalog for native Anthropic chat and OpenAI chat/Responses models; this is pricing metadata, not account availability |
 | 115 | **A workspace without git is not a failure.** `git_status`'s reply gains `not_a_repo`. A plain existing directory with no Git metadata replies `not_a_repo: true` with empty files and null branch fields instead of an `error`, so the renderer shows its not-a-repo state without an app-wide error toast. A missing directory or any Git probe failure remains an `error`; no other message changes |
 | 114 | **A pane says which branch it is on.** `git_branch`'s reply gains `toplevel` and `common_dir` beside `branch`, all nullable. The branch is read from the checkout's HEAD, which is also the only source that answers before a repository's first commit; `toplevel` and `common_dir` come from one `rev-parse --show-toplevel --path-format=absolute --git-common-dir`. `toplevel` names the work tree, `common_dir` the repository a checkout belongs to; a non-repo replies with all three null, a detached HEAD keeps `toplevel`/`common_dir` and nulls only `branch`. The renderer shows the branch in the pane header and groups live panes by these two facts: equal `toplevel` is one shared checkout, equal `common_dir` across different toplevels is a main checkout and its worktree. Nothing is persisted and no other message changes |
 | 113 | **Orchestration spans registered workspaces and records child lifetime.** `pane_spawn`/`hs-pane spawn` gain registered `target_workspace`, `reusable` lifecycle selection and provider-validated `effort`; `DelegationInfo` carries the persisted reusable choice. Temporary children are removed only after a durable completed handback, while the delegation ancestry, inbox rows and bounded sender identity snapshots remain available for scoped historical waits |
