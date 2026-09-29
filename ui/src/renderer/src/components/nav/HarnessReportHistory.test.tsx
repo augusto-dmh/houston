@@ -7,6 +7,8 @@ import type { HarnessReport } from '../../houston/useHarness'
 import { loadMarkdownPipeline } from '../MarkdownPreview'
 import { HarnessHistory } from './HarnessHistory'
 import { HarnessReportView } from './HarnessReportView'
+// Warm the lazy dependency graph before timed layout assertions.
+await loadMarkdownPipeline()
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const REVIEW: HarnessReview = {

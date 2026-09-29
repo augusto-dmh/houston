@@ -98,10 +98,8 @@ impl ModelTable {
                 }
             }
         }
-        options.sort_by(|left, right| {
-            (left.provider as u8, left.id.to_ascii_lowercase())
-                .cmp(&(right.provider as u8, right.id.to_ascii_lowercase()))
-        });
+        options
+            .sort_by_cached_key(|option| (option.provider as u8, option.id.to_ascii_lowercase()));
         Self {
             models: Arc::new(models),
             options: Arc::new(options),
