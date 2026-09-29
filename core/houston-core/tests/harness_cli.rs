@@ -258,6 +258,30 @@ fn inventory_reads_rule_paths() {
 }
 
 #[test]
+fn inventory_reads_rules_in_subdirectories() {
+    let f = Fixture::new();
+    f.write(".claude/rules/app.md", "# App rule\n");
+    f.write(
+        ".claude/rules/backend/security.md",
+        "---\npaths: [\"api/**\"]\n---\n# Security\n",
+    );
+    f.write(".claude/rules/backend/notes.txt", "not a rule\n");
+    let inv = f.inventory();
+    let paths: Vec<&str> = inv["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [".claude/rules/app.md", ".claude/rules/backend/security.md"]
+    );
+    assert_eq!(inv["rules"][1]["paths"], serde_json::json!(["api/**"]));
+    assert_eq!(inv["rules_truncated"], false);
+}
+
+#[test]
 fn inventory_reads_skill_frontmatter() {
     let f = Fixture::new();
     f.write(

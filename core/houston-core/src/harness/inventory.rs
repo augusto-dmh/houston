@@ -245,6 +245,45 @@ fn sorted_children(dir: &Path, ext: &str) -> Vec<PathBuf> {
     files
 }
 
+/// Claude loads `.claude/rules/` recursively; these bound that walk the way
+/// `MAX_DEPTH` and `MAX_DIRS` bound the workspace walk.
+const RULES_MAX_DEPTH: usize = 8;
+const RULES_MAX_FILES: usize = 1_000;
+
+/// Every `.md` under `dir`, sorted, and whether a bound cut the walk short.
+/// Symlinked directories are followed once each, so a cycle ends the branch.
+fn rule_files(dir: &Path) -> (Vec<PathBuf>, bool) {
+    let mut files = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![(dir.to_path_buf(), 0usize)];
+    let mut truncated = false;
+    'walk: while let Some((dir, depth)) = stack.pop() {
+        if !std::fs::canonicalize(&dir).is_ok_and(|c| seen.insert(c)) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            if path.is_dir() {
+                if depth < RULES_MAX_DEPTH {
+                    stack.push((path, depth + 1));
+                } else {
+                    truncated = true;
+                }
+            } else if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
+                if files.len() == RULES_MAX_FILES {
+                    truncated = true;
+                    break 'walk;
+                }
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    (files, truncated)
+}
+
 #[derive(Default)]
 struct Found {
     instructions: Vec<Value>,
@@ -305,12 +344,11 @@ fn walk(ws: &Path) -> Found {
 pub fn build(ws: &Path, home: Option<&Path>, generated_at: &str) -> Value {
     let found = walk(ws);
     let (mut rules, mut skills, mut settings, mut agents) = (vec![], vec![], vec![], vec![]);
+    let mut rules_truncated = false;
     for claude in &found.claude_dirs {
-        rules.extend(
-            sorted_children(&claude.join("rules"), "md")
-                .iter()
-                .map(|p| rule_entry(ws, p)),
-        );
+        let (files, capped) = rule_files(&claude.join("rules"));
+        rules_truncated |= capped;
+        rules.extend(files.iter().map(|p| rule_entry(ws, p)));
         skills_under(ws, &claude.join("skills"), "repo", &mut skills);
         for name in ["settings.json", "settings.local.json"] {
             let p = claude.join(name);
@@ -342,6 +380,7 @@ pub fn build(ws: &Path, home: Option<&Path>, generated_at: &str) -> Value {
         "generated_at": generated_at,
         "instructions": found.instructions,
         "rules": rules,
+        "rules_truncated": rules_truncated,
         "skills": skills,
         "user_skills": user_skills,
         "settings": settings,
