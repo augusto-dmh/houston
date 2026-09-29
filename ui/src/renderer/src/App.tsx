@@ -116,6 +116,7 @@ import { SkillsSurface } from "./components/nav/SkillsSurface";
 import { McpSurface } from "./components/nav/McpSurface";
 import { setSettingsSection, useSettingsSection } from "./settingsNav";
 import { RoutinesSurface } from "./components/nav/RoutinesSurface";
+import { HarnessView, useHarnessActions } from "./components/nav/HarnessView";
 import type { Routine, RoutineRefusal, RoutineRun } from "./houston/routineTypes";
 import { engineLabel } from "./components/engineLabel";
 import { LayoutView } from "./components/LayoutView";
@@ -615,6 +616,18 @@ function offeredUpdate(
 }
 
 const RECONNECT_MS = 1000;
+
+// Connections before its first `mcp_state` shows empty lists, not a missing view.
+function mcpSurfaceLists(mcp: McpStateView | null) {
+  return {
+    source: mcp?.source ?? [],
+    tools: mcp?.tools ?? [],
+    results: mcp?.results ?? [],
+    checks: mcp?.checks ?? [],
+    loaded: mcp !== null,
+    sourcePath: mcp?.sourcePath ?? null,
+  };
+}
 
 export function App(): React.JSX.Element {
   const [conn, setConn] = useState<Conn>({ kind: "connecting" });
@@ -2518,6 +2531,12 @@ export function App(): React.JSX.Element {
   const revealWorkspace = useCallback((dir: string): void => {
     if (selectedWsRef.current === "all") setSelectedWs(dir);
   }, []);
+  const harness = useHarnessActions({
+    conn,
+    showWorkspace: setSelectedWs,
+    openEditorFile,
+    pushError,
+  });
   const openScmFile = useCallback(
     (path: string): void => {
       if (!scmDir) return;
@@ -4016,11 +4035,7 @@ export function App(): React.JSX.Element {
                     />
                   ) : railView === "mcp" ? (
                     <McpSurface
-                      source={mcp?.source ?? []}
-                      tools={mcp?.tools ?? []}
-                      results={mcp?.results ?? []}
-                      checks={mcp?.checks ?? []}
-                      loaded={mcp !== null}
+                      {...mcpSurfaceLists(mcp)}
                       onRefresh={() => {
                         if (conn.kind === "ready") conn.client.mcpState();
                       }}
@@ -4046,7 +4061,6 @@ export function App(): React.JSX.Element {
                       onOpenSource={() => {
                         if (mcp) void showItemInFolder(mcp.sourcePath);
                       }}
-                      sourcePath={mcp?.sourcePath ?? null}
                       checkedAt={mcpCheckedAt}
                     />
                   ) : railView === "routines" ? (
@@ -4090,6 +4104,24 @@ export function App(): React.JSX.Element {
                         lastRoutineRequest.current = request;
                       }}
                       now={Date.now()}
+                    />
+                  ) : railView === "harness" ? (
+                    <HarnessView
+                      client={harness.client}
+                      workspaces={workspaces.map((w) => ({
+                        id: w.path,
+                        name: w.name,
+                      }))}
+                      selectedWorkspace={selectedWs}
+                      routinesRunning={routinesRunning}
+                      liveSessions={sessions}
+                      onOpenSession={(sessionId) => {
+                        setRailView(null);
+                        focusPane(sessionId);
+                      }}
+                      onOpenFile={harness.openFile}
+                      onReveal={harness.reveal}
+                      onPrepareFix={harness.spawnFix}
                     />
                   ) : (
                   <Suspense fallback={<div className="flex-1" />}>

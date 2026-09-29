@@ -1662,6 +1662,7 @@ const RAIL_VIEW_ICON: Readonly<Record<RailView, (p: IconProps) => React.JSX.Elem
   Object.freeze({
     skills: IconZap,
     routines: IconClock,
+    harness: IconTarget,
     mcp: IconGlobe,
   });
 
