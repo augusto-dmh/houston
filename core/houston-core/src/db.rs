@@ -6,6 +6,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
+mod harness;
+pub use harness::{
+    HarnessDecisionRow, HarnessFindingRow, HarnessFindingWrite, HarnessPublication,
+    HarnessReviewRow,
+};
+
 #[derive(Debug, Clone)]
 pub struct SkillPushRow {
     pub tool: String,
@@ -1386,6 +1392,7 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_routine_runs_routine
                 ON routine_runs(routine_id, id DESC);",
         )?;
+        harness::migrate(&conn)?;
         add_column_if_missing(
             &conn,
             "routines",
@@ -2993,6 +3000,10 @@ impl Db {
     pub fn delete_routine(&self, id: u32) -> Result<bool> {
         let conn = self.conn.lock().expect("db lock");
         let changed = conn.execute("DELETE FROM routines WHERE id = ?1", rusqlite::params![id])?;
+        conn.execute(
+            "DELETE FROM harness_routines WHERE routine_id = ?1",
+            rusqlite::params![id],
+        )?;
         Ok(changed > 0)
     }
 

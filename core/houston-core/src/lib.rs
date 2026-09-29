@@ -35,6 +35,7 @@ pub mod markers;
 pub mod mcp;
 pub mod mcp_check;
 pub mod mcp_creds;
+pub mod mcp_harness;
 pub mod mcp_launch;
 pub mod mcp_orchestration;
 pub mod mcp_register;

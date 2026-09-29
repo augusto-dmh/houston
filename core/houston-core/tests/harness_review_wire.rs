@@ -5,11 +5,13 @@ mod common;
 use common::start_daemon_with_handle;
 use houston_core::daemon::{CreateParams, Daemon};
 use houston_core::hook_drop::{self, HookDrop};
-use houston_core::orchestrate::Submission;
+use houston_core::mcp_creds::McpScope;
 use houston_protocol as proto;
+use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -22,12 +24,27 @@ async fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
+fn weekly() -> proto::Cadence {
+    proto::Cadence::Clock {
+        hour: 9,
+        minute: 0,
+        weekdays: Some(vec![1]),
+    }
+}
+
 fn review_routine(daemon: &Daemon, ws: &Path) -> proto::Routine {
     let proto::ServerMsg::Routines { routines, .. } = daemon
-        .harness_review_create(&ws.display().to_string())
+        .harness_routine_create(
+            &ws.display().to_string(),
+            proto::AgentKind::Claude,
+            None,
+            None,
+            weekly(),
+            false,
+        )
         .expect("the preset creates")
     else {
-        panic!("harness_review_create answers Routines");
+        panic!("harness_routine_create answers Routines");
     };
     routines
         .into_iter()
@@ -55,6 +72,159 @@ async fn run_now(daemon: &Arc<Daemon>, routine: u32, cmd: Vec<String>) -> (u32, 
 
 fn sleeper() -> Vec<String> {
     vec!["sh".into(), "-c".into(), "sleep 30".into()]
+}
+
+fn state(
+    daemon: &Daemon,
+    ws: &Path,
+) -> (
+    Option<proto::Routine>,
+    Vec<proto::HarnessReview>,
+    Vec<proto::HarnessFinding>,
+) {
+    match daemon.harness_state(&ws.display().to_string()).unwrap() {
+        proto::ServerMsg::HarnessState {
+            routine,
+            reviews,
+            findings,
+            ..
+        } => (routine, reviews, findings),
+        other => panic!("harness_state answers HarnessState, not {other:?}"),
+    }
+}
+
+fn plain_pane(daemon: &Arc<Daemon>, ws: &Path) -> u32 {
+    daemon
+        .create_session(CreateParams {
+            agent: proto::AgentKind::Custom,
+            project_dir: ws.to_path_buf(),
+            cmd: Some(sleeper()),
+            cols: 80,
+            rows: 24,
+            cwd_from: None,
+            shell_integration: false,
+            auto_approve: false,
+            acp: None,
+            profile: None,
+            prompt: None,
+        })
+        .unwrap()
+        .id
+}
+
+fn token(daemon: &Daemon, pane: u32, ws: &Path) -> String {
+    daemon.mcp_creds.issue(McpScope {
+        session_id: pane,
+        workspace_id: ws.display().to_string(),
+    })
+}
+
+/// One POST with a bearer token; answers the status and the JSON body.
+async fn post(addr: std::net::SocketAddr, path: &str, token: &str, body: Value) -> (u16, Value) {
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let body = body.to_string();
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+         Accept: application/json, text/event-stream\r\nContent-Type: application/json\r\n\
+         Authorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(body.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").expect("an HTTP response");
+    let status = head
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .expect("a status code");
+    let body = if head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        let mut out = String::new();
+        let mut rest = body;
+        while let Some((size, after)) = rest.split_once("\r\n") {
+            let size = usize::from_str_radix(size.trim(), 16).unwrap();
+            if size == 0 {
+                break;
+            }
+            out.push_str(&after[..size]);
+            rest = &after[size + 2..];
+        }
+        out
+    } else {
+        body.to_string()
+    };
+    let json =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("body is not JSON ({e}): {body:?}"));
+    (status, json)
+}
+
+async fn mcp(addr: std::net::SocketAddr, token: &str, method: &str, params: Value) -> Value {
+    let (status, v) = post(
+        addr,
+        "/mcp",
+        token,
+        json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }),
+    )
+    .await;
+    assert_eq!(status, 200, "{v}");
+    v
+}
+
+async fn tool_names(addr: std::net::SocketAddr, token: &str) -> Vec<String> {
+    mcp(addr, token, "tools/list", json!({})).await["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+async fn publish(addr: std::net::SocketAddr, token: &str, summary: &str) -> Value {
+    mcp(
+        addr,
+        token,
+        "tools/call",
+        json!({ "name": "harness_publish", "arguments": { "summary": summary } }),
+    )
+    .await
+}
+
+fn findings_json(keys: &[&str]) -> String {
+    let findings: Vec<Value> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, key)| {
+            json!({
+                "id": format!("F{}", i + 1), "key": key, "category": "permissions",
+                "title": format!("Finding {key}"),
+                "evidence": { "sessions": ["s1", "s2"], "count": 2, "quotes": ["why?"] },
+                "recommendation": {
+                    "kind": "settings-allow", "target": ".claude/settings.json",
+                    "summary": "Allow it", "apply_prompt": format!("Fix {key}")
+                },
+                "confidence": "high", "source": "digest", "recurrence_of": null
+            })
+        })
+        .collect();
+    json!({
+        "schema": 1,
+        "run": { "workspace": "/ws", "window": ["2026-09-01", "2026-09-15"],
+                 "sessions": 7, "providers": ["claude"], "prompts": 40, "cost_usd": 1.25 },
+        "findings": findings,
+    })
+    .to_string()
+}
+
+/// Writes a finished run's two files where its review expects them.
+fn write_result(review: &proto::HarnessReview, keys: &[&str]) {
+    let dir = Path::new(&review.run_dir);
+    std::fs::write(dir.join("report.md"), "# Report\n\nOne finding.\n").unwrap();
+    std::fs::write(dir.join("findings.json"), findings_json(keys)).unwrap();
 }
 
 #[tokio::test]
@@ -121,51 +291,275 @@ async fn hs_harness_wrapper_sits_beside_hs_pane() {
 }
 
 #[tokio::test]
-async fn routine_run_submit_reaches_the_operator_inbox() {
-    let (_addr, state, daemon) = start_daemon_with_handle().await;
-    let ws = workspace(state.path());
+async fn a_workspace_has_one_review_routine_until_it_is_deleted() {
+    let (_addr, state_dir, daemon) = start_daemon_with_handle().await;
+    let ws = workspace(state_dir.path());
+    let r = review_routine(&daemon, &ws);
+    assert_eq!(state(&daemon, &ws).0.map(|r| r.id), Some(r.id));
+    let err = daemon
+        .harness_routine_create(
+            &ws.display().to_string(),
+            proto::AgentKind::Codex,
+            None,
+            None,
+            weekly(),
+            true,
+        )
+        .expect_err("a second routine for the same workspace is refused")
+        .to_string();
+    assert!(
+        err.contains(&format!(
+            "already has its Harness review routine (routine {})",
+            r.id
+        )),
+        "{err}"
+    );
+    daemon.routine_delete(r.id, &r.revision).unwrap();
+    assert!(state(&daemon, &ws).0.is_none());
+    review_routine(&daemon, &ws);
+}
+
+#[tokio::test]
+async fn a_review_pane_discovers_harness_publish_over_mcp_whether_orchestration_is_on_or_off() {
+    let (addr, state_dir, daemon) = start_daemon_with_handle().await;
+    let ws = workspace(state_dir.path());
     let r = review_routine(&daemon, &ws);
     let (_, pane) = run_now(&daemon, r.id, sleeper()).await;
-    let run_dir = ws.join(".houston/harness/r1");
-    std::fs::create_dir_all(&run_dir).unwrap();
-    std::fs::write(run_dir.join("report.md"), "# Report\n").unwrap();
-    std::fs::write(
-        run_dir.join("findings.json"),
-        r#"{"schema":1,"findings":[]}"#,
+    let review_token = token(&daemon, pane, &ws);
+    let other = plain_pane(&daemon, &ws);
+    let other_token = token(&daemon, other, &ws);
+
+    for on in [false, true] {
+        daemon.orchestration_set(on).unwrap();
+        let names = tool_names(addr, &review_token).await;
+        assert!(
+            names.iter().any(|n| n == "harness_publish"),
+            "orchestration {on}: the review pane lists harness_publish in {names:?}"
+        );
+        let names = tool_names(addr, &other_token).await;
+        assert!(
+            !names.iter().any(|n| n == "harness_publish"),
+            "orchestration {on}: an ordinary pane is not offered harness_publish: {names:?}"
+        );
+        let refused = publish(addr, &other_token, "x").await.to_string();
+        assert!(
+            refused.contains(&format!(
+                "harness_publish refused: pane {other} is not a Harness review run in flight"
+            )),
+            "orchestration {on}: {refused}"
+        );
+    }
+
+    let err = daemon
+        .orchestrate_submit(pane, "a result".to_string().into())
+        .expect_err("a review pane hands back through harness_publish")
+        .to_string();
+    assert!(
+        err.contains("publishes its result with harness_publish"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn a_published_review_is_stored_per_workspace_with_its_findings_and_report() {
+    let (addr, state_dir, daemon) = start_daemon_with_handle().await;
+    let ws = workspace(state_dir.path());
+    let r = review_routine(&daemon, &ws);
+    let (run_id, pane) = run_now(&daemon, r.id, sleeper()).await;
+    let (_, reviews, _) = state(&daemon, &ws);
+    let review = &reviews[0];
+    assert_eq!(review.status, proto::HarnessReviewStatus::Running);
+    assert_eq!(review.run_id, run_id);
+    assert_eq!(review.session_id, Some(pane));
+    assert_eq!(
+        Path::new(&review.run_dir),
+        ws.join(format!(".houston/harness/r{run_id}"))
+    );
+    write_result(review, &["denied-push", "stale-rule"]);
+
+    let res = publish(
+        addr,
+        &token(&daemon, pane, &ws),
+        "Harness review: 2 findings",
+    )
+    .await;
+    assert!(res.to_string().contains("published 2 findings"), "{res}");
+
+    let (_, reviews, findings) = state(&daemon, &ws);
+    let review = &reviews[0];
+    assert_eq!(review.status, proto::HarnessReviewStatus::Published);
+    assert_eq!(review.finding_count, 2);
+    assert_eq!(
+        review.summary.as_deref(),
+        Some("Harness review: 2 findings")
+    );
+    assert_eq!(
+        review.window,
+        Some(("2026-09-01".to_string(), "2026-09-15".to_string()))
+    );
+    assert_eq!((review.sessions, review.prompts), (Some(7), Some(40)));
+    let keys: Vec<&str> = findings.iter().map(|f| f.key.as_str()).collect();
+    assert_eq!(keys, ["denied-push", "stale-rule"]);
+    assert!(findings
+        .iter()
+        .all(|f| f.state == proto::HarnessFindingState::Open));
+    assert_eq!(findings[0].apply_prompt, "Fix denied-push");
+
+    let proto::ServerMsg::HarnessReport {
+        markdown,
+        truncated,
+        ..
+    } = daemon.harness_report(review.id).unwrap()
+    else {
+        panic!("harness_report answers HarnessReport");
+    };
+    assert_eq!(markdown, "# Report\n\nOne finding.\n");
+    assert!(!truncated);
+
+    let elsewhere = state_dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let (routine, reviews, findings) = state(&daemon, &elsewhere);
+    assert!(routine.is_none() && reviews.is_empty() && findings.is_empty());
+
+    daemon.routine_pane_exited_for_test(pane);
+    let (_, reviews, _) = state(&daemon, &ws);
+    assert_eq!(
+        reviews[0].status,
+        proto::HarnessReviewStatus::Published,
+        "the run ending after it published keeps the review"
+    );
+}
+
+#[tokio::test]
+async fn decisions_outlive_their_review_and_a_recurrence_reopens_them() {
+    let (addr, state_dir, daemon) = start_daemon_with_handle().await;
+    let ws = workspace(state_dir.path());
+    let w = ws.display().to_string();
+    let r = review_routine(&daemon, &ws);
+    let (_, pane) = run_now(&daemon, r.id, sleeper()).await;
+    write_result(&state(&daemon, &ws).1[0], &["denied-push", "stale-rule"]);
+    publish(addr, &token(&daemon, pane, &ws), "2 findings").await;
+    daemon.routine_pane_exited_for_test(pane);
+
+    daemon
+        .harness_decide(&w, "denied-push", proto::HarnessFindingState::Dismissed)
+        .unwrap();
+    daemon
+        .harness_decide(&w, "stale-rule", proto::HarnessFindingState::Resolved)
+        .unwrap();
+    let find = |key: &str| {
+        state(&daemon, &ws)
+            .2
+            .into_iter()
+            .find(|f| f.key == key)
+            .unwrap()
+    };
+    assert_eq!(
+        find("denied-push").state,
+        proto::HarnessFindingState::Dismissed
+    );
+    assert!(find("denied-push").decided_at_ms.is_some());
+    daemon
+        .harness_decide(&w, "denied-push", proto::HarnessFindingState::Open)
+        .unwrap();
+    assert_eq!(find("denied-push").state, proto::HarnessFindingState::Open);
+    daemon
+        .harness_decide(&w, "denied-push", proto::HarnessFindingState::Dismissed)
+        .unwrap();
+    let err = daemon
+        .harness_decide(&w, "no-such-key", proto::HarnessFindingState::Dismissed)
+        .expect_err("a decision needs a finding")
+        .to_string();
+    assert!(err.contains("no finding with key \"no-such-key\""), "{err}");
+
+    let (_, second) = run_now(&daemon, r.id, sleeper()).await;
+    let review = state(&daemon, &ws).1[0].clone();
+    let decisions: Value = serde_json::from_str(
+        &std::fs::read_to_string(Path::new(&review.run_dir).join("decisions.json")).unwrap(),
     )
     .unwrap();
-
-    let outcome = daemon
-        .orchestrate_submit(
-            pane,
-            Submission {
-                body: "2 findings: handoff, worktree guard".into(),
-                summary: Some("Harness review: 2 findings".into()),
-                artifacts: vec![
-                    ".houston/harness/r1/report.md".into(),
-                    ".houston/harness/r1/findings.json".into(),
-                ],
-                request_id: None,
-            },
-        )
-        .expect("a routine run's pane can hand back");
-    assert_eq!(outcome.reason, Some("routine"));
-
-    let rows = daemon.inbox_rows_for_test(0);
-    let row = rows
+    let states: Vec<(String, String)> = decisions["findings"]
+        .as_array()
+        .unwrap()
         .iter()
-        .find(|row| row.id == outcome.row_id)
-        .expect("the result is in the operator's inbox");
-    assert_eq!(row.to_session, 0);
-    assert_eq!(row.kind, "result");
-    assert_eq!(row.reason.as_deref(), Some("routine"));
-    assert_eq!(row.from_session, Some(pane));
+        .map(|f| {
+            (
+                f["key"].as_str().unwrap().into(),
+                f["state"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
     assert_eq!(
-        row.artifacts,
+        states,
         [
-            run_dir.join("report.md").display().to_string(),
-            run_dir.join("findings.json").display().to_string()
-        ]
+            ("denied-push".to_string(), "dismissed".to_string()),
+            ("stale-rule".to_string(), "resolved".to_string())
+        ],
+        "the next run is told what the operator decided"
+    );
+
+    write_result(&review, &["stale-rule"]);
+    publish(addr, &token(&daemon, second, &ws), "1 finding").await;
+    let stale = find("stale-rule");
+    assert_eq!(stale.state, proto::HarnessFindingState::Open);
+    assert!(stale.recurred, "raised again after it was resolved");
+    assert_eq!(stale.review_id, review.id);
+    let push = find("denied-push");
+    assert_eq!(push.state, proto::HarnessFindingState::Dismissed);
+    assert!(!push.recurred);
+}
+
+#[tokio::test]
+async fn a_run_that_ends_without_publishing_leaves_a_failed_review() {
+    let (_addr, state_dir, daemon) = start_daemon_with_handle().await;
+    let ws = workspace(state_dir.path());
+    let r = review_routine(&daemon, &ws);
+    let (_, pane) = run_now(&daemon, r.id, sleeper()).await;
+    daemon.routine_pane_exited_for_test(pane);
+    let review = &state(&daemon, &ws).1[0];
+    assert_eq!(review.status, proto::HarnessReviewStatus::Failed);
+    assert_eq!(
+        review.error.as_deref(),
+        Some("the run ended without publishing: its agent never called harness_publish")
+    );
+}
+
+#[tokio::test]
+async fn hs_harness_publish_reaches_the_daemon_over_its_http_door() {
+    let (addr, state_dir, daemon) = start_daemon_with_handle().await;
+    let ws = workspace(state_dir.path());
+    let r = review_routine(&daemon, &ws);
+    let (_, pane) = run_now(&daemon, r.id, sleeper()).await;
+    let review = state(&daemon, &ws).1[0].clone();
+
+    let (status, body) = post(
+        addr,
+        "/harness/publish",
+        &token(&daemon, pane, &ws),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("report.md does not exist"),
+        "{body}"
+    );
+
+    write_result(&review, &["denied-push"]);
+    let (status, body) = post(
+        addr,
+        "/harness/publish",
+        &token(&daemon, pane, &ws),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        state(&daemon, &ws).1[0].summary.as_deref(),
+        Some("1 findings")
     );
 }
 
@@ -173,23 +567,9 @@ async fn routine_run_submit_reaches_the_operator_inbox() {
 async fn parentless_non_routine_submit_is_still_refused() {
     let (_addr, state, daemon) = start_daemon_with_handle().await;
     let ws = workspace(state.path());
-    let info = daemon
-        .create_session(CreateParams {
-            agent: proto::AgentKind::Custom,
-            project_dir: ws,
-            cmd: Some(sleeper()),
-            cols: 80,
-            rows: 24,
-            cwd_from: None,
-            shell_integration: false,
-            auto_approve: false,
-            acp: None,
-            profile: None,
-            prompt: None,
-        })
-        .unwrap();
+    let pane = plain_pane(&daemon, &ws);
     let err = daemon
-        .orchestrate_submit(info.id, "a result".to_string().into())
+        .orchestrate_submit(pane, "a result".to_string().into())
         .expect_err("a pane nobody spawned has nobody to submit to")
         .to_string();
     assert!(

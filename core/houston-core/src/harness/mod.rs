@@ -1,6 +1,7 @@
 //! `hs-harness`: the extractor a harness review run calls from inside its
 //! pane. The daemon never runs it; see carve-out #6 in `invariants.md`.
 pub mod digest;
+pub mod findings;
 pub mod inventory;
 pub mod window;
 
@@ -24,8 +25,9 @@ commands:
          [--provider claude,codex]
       write digest.jsonl (one line per session) and digest-meta.json;
       only inside a Harness review routine run
-  preset [--workspace DIR]
-      print the fields of the Harness review routine for this workspace
+  publish [--summary TEXT]
+      hand this run's report.md and findings.json to Houston's Harness view;
+      only inside a Harness review routine run
 
 Output goes to <workspace>/.houston/harness/<run>/.";
 
@@ -56,12 +58,7 @@ fn cli(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("digest") => digest_cmd(flag("workspace"), &flags),
-        Some("preset") => {
-            let ws = workspace()?;
-            let preset = crate::routines::harness_review_preset(&ws.to_string_lossy());
-            println!("{}", serde_json::to_string_pretty(&preset)?);
-            Ok(())
-        }
+        Some("publish") => publish_cmd(flag("summary")),
         _ => bail!("{USAGE}"),
     }
 }
@@ -103,8 +100,13 @@ fn harness_root(ws: &Path) -> PathBuf {
 }
 
 fn run_dir(ws: &Path, flag: Option<&str>) -> Result<PathBuf> {
+    prepare_run_dir(ws, &run_id(flag)?)
+}
+
+/// `<ws>/.houston/harness/<run>`, created with the ignore file beside it.
+pub fn prepare_run_dir(ws: &Path, run: &str) -> Result<PathBuf> {
     let root = harness_root(ws);
-    let dir = root.join(run_id(flag)?);
+    let dir = root.join(run);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let gitignore = root.join(".gitignore");
     if !gitignore.exists() {
@@ -285,5 +287,23 @@ fn digest_cmd(
         window::format_ms(window.until_ms),
         dir.display()
     );
+    Ok(())
+}
+
+/// The CLI door to the daemon's `harness_publish`, for a CLI without MCP.
+fn publish_cmd(summary: Option<&str>) -> Result<()> {
+    let base = crate::orchestrate::cli_base_url(std::env::var("HOUSTON_MCP_URL").ok().as_deref())?;
+    let token = std::env::var("HOUSTON_MCP_TOKEN").map_err(|_| {
+        anyhow!("HOUSTON_MCP_TOKEN is not set; publish runs only inside a Houston pane")
+    })?;
+    let v = crate::orchestrate::cli_call(
+        &base,
+        &token,
+        "POST",
+        "/harness/publish",
+        Some(json!({ "summary": summary })),
+        crate::orchestrate::CLI_HTTP_TIMEOUT,
+    )?;
+    println!("{}", v["note"].as_str().unwrap_or_default());
     Ok(())
 }

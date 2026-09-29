@@ -919,6 +919,8 @@ impl DelegationSettleSample {
     }
 }
 
+mod harness_review;
+
 type TranscriptLink = (Option<String>, Option<String>);
 
 /// What a drop adds to the stored link, or `None` when it adds nothing.
@@ -2328,6 +2330,9 @@ impl Daemon {
             .register(Arc::new(crate::browser_relay::BrowserRelayTools::new(
                 &daemon,
             )));
+        daemon
+            .mcp_tools
+            .register(Arc::new(crate::mcp_harness::HarnessTools::new(&daemon)));
         if let Some(adopted) = adopted {
             for (session, reader) in adopted {
                 let id = session.info.id;
@@ -4357,23 +4362,6 @@ impl Daemon {
         )
     }
 
-    /// The Harness review routine for `workspace`, created paused.
-    pub fn harness_review_create(&self, workspace: &str) -> Result<proto::ServerMsg> {
-        let p = crate::routines::harness_review_preset(workspace);
-        self.routine_create_impl(
-            &p.name,
-            &p.prompt,
-            p.cadence,
-            Some(p.workspace_id),
-            p.engine,
-            p.model,
-            p.effort,
-            Some(p.permission_mode),
-            Some(p.isolate),
-            p.enabled,
-        )
-    }
-
     /// The wire entry. `engine` is mandatory: it is the record's own, and a
     /// fire never reads execution settings off anything else.
     #[allow(clippy::too_many_arguments)]
@@ -4857,6 +4845,7 @@ impl Daemon {
         error: String,
     ) -> Result<()> {
         let run_id = self.record_run_start(row, trigger, None, now, next)?;
+        self.harness_review_start(row, run_id, None, now);
         self.settle_run(
             run_id,
             row.id,
@@ -4919,6 +4908,7 @@ impl Daemon {
             tracing::warn!("closing routine {routine_id}'s run {run_id}: {e:#}");
         }
         self.broadcast_routine_run(run_id);
+        self.harness_review_settle(run_id, error.as_deref());
         self.settle_routine_run(routine_id, outcome, error);
     }
 
@@ -4958,6 +4948,7 @@ impl Daemon {
                 .expect("the caller refused a routine with no directory at all"),
         };
         let run_id = self.record_run_start(row, trigger, None, now, next)?;
+        self.harness_review_start(row, run_id, Some(dir.as_str()), now);
         let cmd_override = self
             .routine_pane_cmd_override
             .lock()
@@ -5020,6 +5011,7 @@ impl Daemon {
             }
         };
         self.record_approval_mode(session.id, approval);
+        self.harness_review_session(run_id, session.id);
         if let Err(e) = self.db.set_routine_run_session(run_id, session.id) {
             tracing::warn!("recording routine {}'s pane session: {e:#}", row.id);
         }
@@ -12797,9 +12789,10 @@ impl Daemon {
             let s = self.get(child)?;
             match s.info.spawned_by {
                 Some(parent) => parent,
-                None if self.is_routine_run_pane(child) => {
-                    return self.submit_routine_run_to_operator(child, submission);
-                }
+                None if self.is_harness_review_pane(child) => bail!(
+                    "session {child} is a Harness review run: it publishes its result with \
+                     harness_publish (or `hs-harness publish`), not pane_submit"
+                ),
                 None => bail!("session {child} was not spawned by an agent — nothing to submit to"),
             }
         };
@@ -12865,73 +12858,6 @@ impl Daemon {
             request_id,
             reason,
             note,
-        })
-    }
-
-    fn is_routine_run_pane(&self, session: u32) -> bool {
-        self.routine_runs
-            .lock()
-            .expect("routine run lock")
-            .values()
-            .any(|run| run.session_id == Some(session))
-    }
-
-    /// A routine run's pane has no parent pane; its hand-back is the result the
-    /// operator asked for by creating the routine, so it lands in their inbox.
-    fn submit_routine_run_to_operator(
-        self: &Arc<Self>,
-        child: u32,
-        submission: orchestrate::Submission,
-    ) -> Result<orchestrate::SubmitOutcome> {
-        let artifacts = self.resolve_artifacts(child, &submission.artifacts)?;
-        let workspace = self.current_workspace(child)?;
-        let body = orchestrate::cap_submit_body(&orchestrate::sanitize_handoff_text(
-            submission.body.trim(),
-        ));
-        let summary = submission
-            .summary
-            .as_deref()
-            .map(|s| orchestrate::sanitize_handoff_text(s.trim()))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| orchestrate::submit_summary_fallback(&body));
-        let row = orchestrate::inbox_row_new(
-            0,
-            &workspace,
-            Some(child),
-            None,
-            orchestrate::InboxKind::Result,
-            &summary,
-            &body,
-            artifacts,
-            false,
-            None,
-            Some("routine"),
-            true,
-        )?;
-        let id = self.db.inbox_insert(&row, now_ms()).with_context(|| {
-            format!(
-                "storing your result failed: {} characters of body and {} of summary, against \
-                 the {} / {} caps",
-                body.len(),
-                summary.len(),
-                orchestrate::SUBMIT_BODY_MAX_CHARS,
-                orchestrate::SUBMIT_SUMMARY_MAX_CHARS
-            )
-        })?;
-        if let Some(excerpt) = self.session_handoff_excerpt(child) {
-            if let Err(e) = self.db.inbox_set_excerpt(id, &excerpt) {
-                tracing::warn!("persisting the screen excerpt for routine result {id} failed: {e}");
-            }
-        }
-        self.broadcast_inbox_row(id);
-        self.inbox_notify(0, true);
-        Ok(orchestrate::SubmitOutcome {
-            row_id: id,
-            request_id: None,
-            reason: Some("routine"),
-            note: "delivered to the operator's inbox: this pane is a routine run, and no pane \
-                   spawned it"
-                .to_string(),
         })
     }
 
