@@ -943,12 +943,24 @@ async fn a_pass_measures_and_broadcasts_each_workspace() {
     tokio::task::spawn_blocking(move || d.worktree_cleanup_tick())
         .await
         .unwrap();
+    // The tick has returned, so every broadcast it made is already on the socket.
+    let mut seen = Vec::new();
+    while let Ok(msg) =
+        tokio::time::timeout(Duration::from_millis(500), next_control(&mut client)).await
+    {
+        if let proto::ServerMsg::WorktreeCleanup { dir, entries, .. } = msg {
+            seen.push((dir, entries));
+        }
+    }
     for (ws, tree) in [(&one, &a), (&two, &b)] {
-        let Ok(proto::ServerMsg::WorktreeCleanup { entries, .. }) =
-            next_cleanup(&mut client, &ws.dir).await
-        else {
-            panic!("expected a broadcast for {}", ws.dir.display());
-        };
+        let want = ws.dir.display().to_string();
+        let mine: Vec<_> = seen.iter().filter(|(dir, _)| *dir == want).collect();
+        assert_eq!(
+            mine.len(),
+            1,
+            "exactly one broadcast per workspace: {seen:?}"
+        );
+        let entries = &mine[0].1;
         let entry = entries
             .iter()
             .find(|e| e.path == tree.display().to_string())
@@ -1032,10 +1044,16 @@ async fn a_removal_is_logged_with_path_branch_pr_and_bytes() {
     let (_, removed) = run(&r, &ws.dir).await;
     let bytes = removed[0].bytes.unwrap();
     let text = String::from_utf8_lossy(&logs.lock().unwrap()).to_string();
-    let line = text
+    let lines: Vec<&str> = text
         .lines()
-        .find(|l| l.contains("INFO") && l.contains(&tree.display().to_string()))
-        .unwrap_or_else(|| panic!("no info line names the tree: {text}"));
+        .filter(|l| l.contains("INFO") && l.contains(&tree.display().to_string()))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one info line names the tree: {text}"
+    );
+    let line = lines[0];
     assert!(
         line.contains("houston/logged")
             && line.contains(&format!("#{PR}"))
