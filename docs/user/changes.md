@@ -70,6 +70,29 @@ workspace:
   than the snapshot is lost unless it is committed); Delete removes the snapshot and
   touches no file. A checkpoint is stored as a hidden git ref in the repository itself.
 
+### Cleaning up merged worktrees
+
+Worktrees Houston created — from this dialog, or for an agent through `pane_spawn`'s
+`worktree` — are listed under **Created by Houston** with their size and what, if
+anything, keeps each one. A worktree you made yourself is never removed by Houston.
+
+One can go when its PR is merged on GitHub, it has no uncommitted or untracked files,
+its branch has no commit the PR does not contain, no pane is working inside it, and the
+grace period after the merge has passed. **Clean now** lists what it will remove and
+the space it frees, and asks once before removing those worktrees and their branches.
+
+Otherwise the row says why it stays: uncommitted files, commits outside the PR, the PR's
+head could not be fetched, a pane inside it, the grace period, a PR that is open or was
+closed without merging, no PR, `gh` unavailable, or a removal that failed. Without `gh`,
+a branch whose upstream was deleted reads "probably integrated": Houston cannot tell a
+merge from a closed PR, so it offers **Remove** and leaves the choice to you.
+
+To remove merged worktrees on its own, turn on **Remove merged worktrees automatically**
+under Settings ▸ Workspaces (off by default) and set **Grace after merge** (1 to 720
+hours, 24 by default). The daemon then checks at start and every 6 hours. Each check
+runs `gh pr view` once per recorded worktree, which sends that branch's name to GitHub
+through your own `gh`; without `gh` nothing is sent.
+
 ## Fetching and pulling
 
 Fetch brings remote-tracking branches up to date and reports what changed. Pull is
