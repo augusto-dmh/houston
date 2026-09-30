@@ -1258,6 +1258,12 @@ impl Db {
         add_column_if_missing(
             &conn,
             "sessions",
+            "profile_config_dir",
+            "profile_config_dir TEXT",
+        )?;
+        add_column_if_missing(
+            &conn,
+            "sessions",
             "session_origin",
             "session_origin INTEGER",
         )?;
@@ -1268,6 +1274,18 @@ impl Db {
             "sessions",
             "native_session_id",
             "native_session_id TEXT",
+        )?;
+        add_column_if_missing(
+            &conn,
+            "sessions",
+            "resume_session_id",
+            "resume_session_id TEXT",
+        )?;
+        add_column_if_missing(
+            &conn,
+            "sessions",
+            "resume_transcript_path",
+            "resume_transcript_path TEXT",
         )?;
         ensure_tag_ids_are_monotonic(&conn)?;
         add_column_if_missing(&conn, "sessions", "tags", "tags TEXT NOT NULL DEFAULT '[]'")?;
@@ -1830,6 +1848,8 @@ impl Db {
                             Vec::new()
                         }),
                     session_origin: Some(session_origin),
+                    resumable: false,
+                    resume_notice: None,
                 }),
                 Err(_) => tracing::warn!(
                     "session {id} has unknown agent {agent:?} in the db; not restoring it"
@@ -2120,6 +2140,80 @@ impl Db {
         )?)
     }
 
+    pub fn set_session_profile_config_dir(&self, id: u32, directory: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().expect("db lock");
+        conn.execute(
+            "UPDATE sessions SET profile_config_dir = ?2 WHERE id = ?1",
+            rusqlite::params![id, directory],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_profile_config_dir(&self, id: u32) -> Result<Option<String>> {
+        let conn = self.conn.lock().expect("db lock");
+        Ok(conn.query_row(
+            "SELECT profile_config_dir FROM sessions WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The conversation a Restart or restore resumes, with the transcript path the
+    /// CLI reported for it; `None` clears it.
+    pub fn set_session_resume_handle(
+        &self,
+        id: u32,
+        handle: Option<(&str, Option<&str>)>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("db lock");
+        conn.execute(
+            "UPDATE sessions SET resume_session_id = ?2, resume_transcript_path = ?3 WHERE id = ?1",
+            rusqlite::params![id, handle.map(|h| h.0), handle.and_then(|h| h.1)],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_resume_handle(&self, id: u32) -> Result<Option<(String, Option<String>)>> {
+        let conn = self.conn.lock().expect("db lock");
+        Ok(conn
+            .query_row(
+                "SELECT resume_session_id, resume_transcript_path FROM sessions WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?
+            .and_then(|(handle, path)| handle.map(|h| (h, path))))
+    }
+
+    /// Sessions whose resume handle or current conversation id is `conversation`.
+    pub fn sessions_naming_conversation(&self, conversation: &str) -> Result<Vec<u32>> {
+        let conn = self.conn.lock().expect("db lock");
+        let mut stmt = conn.prepare(
+            "SELECT id FROM sessions WHERE resume_session_id = ?1 OR native_session_id = ?1",
+        )?;
+        let ids = stmt
+            .query_map([conversation], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<u32>, _>>()?;
+        Ok(ids)
+    }
+
+    pub fn is_routine_run_session(&self, session: u32) -> Result<bool> {
+        let conn = self.conn.lock().expect("db lock");
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM routine_runs WHERE session_id = ?1 LIMIT 1",
+                [session],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn session_codename(&self, id: u32) -> Result<Option<String>> {
         let conn = self.conn.lock().expect("db lock");
         Ok(conn
@@ -2258,10 +2352,11 @@ impl Db {
     ) -> Result<()> {
         let conn = self.conn.lock().expect("db lock");
         let ended = !state.is_live();
+        // Close can commit after a waiter checks the row but before its final update.
         conn.execute(
             "UPDATE sessions SET state = ?2, exit_code = COALESCE(?3, exit_code),
                     ended_at = CASE WHEN ?4 THEN unixepoch() ELSE ended_at END
-             WHERE id = ?1",
+             WHERE id = ?1 AND state != 'closed'",
             rusqlite::params![id, state_str(state), exit_code, ended],
         )?;
         Ok(())
@@ -4546,6 +4641,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_existing_sessions_table_gains_the_resume_handle_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sessions (
+                    id INTEGER PRIMARY KEY,
+                    agent TEXT NOT NULL,
+                    project_dir TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    exit_code INTEGER,
+                    created_at INTEGER NOT NULL,
+                    ended_at INTEGER
+                );
+                INSERT INTO sessions (id, agent, project_dir, cwd, state, created_at)
+                    VALUES (7, 'claude', '/tmp/project', '/tmp/project', 'running', 1);",
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.session_resume_handle(7).unwrap(), None);
+        assert_eq!(db.session_profile_config_dir(7).unwrap(), None);
+        db.set_session_profile_config_dir(7, Some("/tmp/profile-a"))
+            .unwrap();
+        assert_eq!(
+            db.session_profile_config_dir(7).unwrap().as_deref(),
+            Some("/tmp/profile-a")
+        );
+        db.set_session_resume_handle(7, Some(("conv-a", Some("/t/conv-a.jsonl"))))
+            .unwrap();
+        assert_eq!(
+            db.session_resume_handle(7).unwrap(),
+            Some(("conv-a".to_string(), Some("/t/conv-a.jsonl".to_string())))
+        );
+    }
+
+    #[test]
     fn tags_migration_preserves_ids_and_session_references_then_never_reuses_ids() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("t.db");
@@ -4685,6 +4820,8 @@ mod tests {
             inbox_unread: 0,
             tags: vec![],
             session_origin: None,
+            resumable: false,
+            resume_notice: None,
         }
     }
 
@@ -4841,6 +4978,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("42"), "error should name the id: {err}");
+    }
+
+    #[test]
+    fn a_closed_session_cannot_be_reopened_by_a_late_completion() {
+        let state = tempfile::tempdir().unwrap();
+        let db = Db::open(&state.path().join("test.db")).unwrap();
+        db.insert_session(&info(1, proto::SessionState::Running))
+            .unwrap();
+        db.mark_closed(1).unwrap();
+
+        db.update_session_state(1, proto::SessionState::Exited, Some(0))
+            .unwrap();
+
+        assert!(db.session_is_closed(1).unwrap());
+        assert_eq!(db.mark_live_as_interrupted().unwrap(), 0);
     }
 
     #[test]

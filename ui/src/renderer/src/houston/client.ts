@@ -515,7 +515,8 @@ export class HoustonClient {
     shellIntegration?: boolean,
     cwd?: string | null,
     shell?: string,
-    force?: boolean
+    force?: boolean,
+    fresh?: boolean
   ): void {
     const msg: Extract<ClientMsg, { type: 'session_respawn' }> = {
       type: 'session_respawn',
@@ -525,6 +526,7 @@ export class HoustonClient {
     }
     if (shell !== undefined) msg.shell = shell
     if (force !== undefined) msg.force = force
+    if (fresh !== undefined) msg.fresh = fresh
     this.send(msg)
   }
 
@@ -1223,6 +1225,10 @@ export class HoustonClient {
 
   restoreBudgetSet(budget: number): void {
     this.send({ type: 'restore_budget_set', budget })
+  }
+
+  restoreResumeSet(enabled: boolean): void {
+    this.send({ type: 'restore_resume_set', enabled })
   }
 
   usageSummaryGet(sinceMs: number, untilMs: number, refreshPricing = false): void {

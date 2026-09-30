@@ -131,6 +131,7 @@ interface Props {
   liveSessionCount?: number
 
   onRestoreBudgetSet: (n: number) => void
+  onRestoreResumeSet: (on: boolean) => void
   sessionPolicy: SessionPolicy | null
   onSessionPolicy: (next: SessionPolicy) => void
 
@@ -220,6 +221,7 @@ function SectionDispatch({
   onOpenExternal,
   liveSessionCount,
   onRestoreBudgetSet,
+  onRestoreResumeSet,
   sessionPolicy,
   onSessionPolicy,
   orchestrationEnabled,
@@ -360,6 +362,7 @@ function SectionDispatch({
         {section === 'workspace-defaults' && (
           <WorkspaceDefaultsSection
             onRestoreBudgetSet={onRestoreBudgetSet}
+            onRestoreResumeSet={onRestoreResumeSet}
             openLinksInPane={openLinksInPane}
             onOpenLinksInPane={onOpenLinksInPane}
             historyWorkspace={historyWorkspace}

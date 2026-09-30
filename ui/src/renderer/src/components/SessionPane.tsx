@@ -13,7 +13,13 @@ import type { SplitSide } from '../layout/tree'
 import { TerminalPane, type RegisterOutput, type TermActions } from '../pane/TerminalPane'
 import { DictationIndicator } from '../voice/DictationIndicator'
 import { AnimOut, MenuLayer } from './AnimOut'
-import { ConfirmModal } from './ConfirmModal'
+import {
+  RestartConfirm,
+  ResumeNotice,
+  restartEntries,
+  restartTooltip,
+  type RestartMode
+} from './PaneRestart'
 import type { HandoffSource } from './PaneHandoff'
 import { clampConversation } from './handoffPacket'
 import { RenameTitle } from './RenameTitle'
@@ -383,7 +389,7 @@ function SessionPaneImpl({
   const focusTier = usePaneFocusTier(active)
 
   const keymapOverrides = useContext(KeymapOverridesContext)
-  const [confirmRestart, setConfirmRestart] = useState(false)
+  const [confirmRestart, setConfirmRestart] = useState<RestartMode | null>(null)
   const termActions = useRef<TermActions | null>(null)
   const [menuCwd, setMenuCwd] = useState<string | null>(null)
 
@@ -469,11 +475,7 @@ function SessionPaneImpl({
           )}
           {!live && (
             <Tooltip
-              label={
-                info.agent === 'ssh'
-                  ? 'Reconnect (opens the SSH dialog prefilled)'
-                  : 'Restart (a fresh agent, not the old conversation)'
-              }
+              label={restartTooltip(info)}
             >
               <button
                 className={`${BTN_ICO_STRUCTURE} ${ICO_HEAD_BASE} ${ICO_HEAD_REGULAR}`}
@@ -546,6 +548,10 @@ function SessionPaneImpl({
           </Tooltip>
         </span>
       </header>
+      <ResumeNotice
+        notice={info.resume_notice}
+        buttonClassName={`${BTN_ICO_STRUCTURE} ${ICO_HEAD_BASE} ${ICO_HEAD_REGULAR}`}
+      />
       <TerminalPane
         client={client}
         info={info}
@@ -568,16 +574,14 @@ function SessionPaneImpl({
         actions={termActions}
       />
       <DictationIndicator session={info.id} />
-      <AnimOut open={confirmRestart} suppress="modal">
+      <AnimOut open={confirmRestart !== null} suppress="modal">
         {confirmRestart && (
-          <ConfirmModal
-            message={`Restart ${info.title}? The CLI running in this pane is killed and started fresh in the same directory — anything it has not written to disk is lost.`}
-            confirmLabel="Restart"
-            onConfirm={() => {
-              setConfirmRestart(false)
-              client.respawnSession(info.id, shellIntegration, undefined, undefined, true)
-            }}
-            onCancel={() => setConfirmRestart(false)}
+          <RestartConfirm
+            mode={confirmRestart}
+            info={info}
+            client={client}
+            shellIntegration={shellIntegration}
+            onClose={() => setConfirmRestart(null)}
           />
         )}
       </AnimOut>
@@ -672,21 +676,21 @@ function SessionPaneImpl({
               }
             })}
           />
-          <CtxRow
-            glyph={IconRespawn}
-            label={info.agent === 'ssh' && !live ? 'Reconnect…' : 'Restart'}
-            onClick={menuItem(() => {
-              if (info.agent === 'ssh' && !live) {
-                onReconnectSsh(info.id)
-                return
-              }
-              if (live) {
-                setConfirmRestart(true)
-                return
-              }
-              client.respawnSession(info.id, shellIntegration)
-            })}
-          />
+          {restartEntries({
+            info,
+            live,
+            client,
+            shellIntegration,
+            confirm: setConfirmRestart,
+            reconnect: () => onReconnectSsh(info.id)
+          }).map((entry) => (
+            <CtxRow
+              key={entry.label}
+              glyph={entry.glyph}
+              label={entry.label}
+              onClick={menuItem(entry.run)}
+            />
+          ))}
           <div className={CTX_SEP_CLS} />
           <CtxRow
             glyph={IconFolder}

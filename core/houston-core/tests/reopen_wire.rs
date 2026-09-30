@@ -270,6 +270,8 @@ async fn respawn_refuses_a_swarm_tied_session() {
             inbox_unread: 0,
             tags: vec![],
             session_origin: None,
+            resumable: false,
+            resume_notice: None,
         })
         .unwrap();
         let roster = vec![proto::SwarmRosterEntry {

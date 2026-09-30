@@ -367,7 +367,7 @@ async fn workspace_remove_kills_sessions_and_deletes_workspace() {
 }
 
 #[tokio::test]
-async fn interrupted_sessions_are_restored_and_respawnable() {
+async fn interrupted_sessions_are_automatically_restored_and_restartable() {
     use houston_core::db::Db;
 
     let state_dir = tempfile::tempdir().unwrap();
@@ -400,6 +400,8 @@ async fn interrupted_sessions_are_restored_and_respawnable() {
             inbox_unread: 0,
             tags: vec![],
             session_origin: None,
+            resumable: false,
+            resume_notice: None,
         })
         .unwrap();
     }
@@ -410,16 +412,19 @@ async fn interrupted_sessions_are_restored_and_respawnable() {
     })
     .unwrap();
 
-    let sessions = daemon.list();
-    assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].id, 1);
-    assert_eq!(sessions[0].state, proto::SessionState::Interrupted);
+    let restored = daemon
+        .list()
+        .into_iter()
+        .filter(|s| s.session_origin == Some(1))
+        .max_by_key(|s| s.id)
+        .expect("the interrupted pane restores automatically");
+    assert_ne!(restored.id, 1);
+    assert_eq!(restored.state, proto::SessionState::Running);
+    assert_eq!(restored.restore_deferred, None);
 
-    let replay = daemon.scrollback(1, None).unwrap();
-    assert!(replay.data.is_empty());
-
-    let fresh = daemon.respawn(1, true, None, None, false).unwrap();
-    assert_ne!(fresh.id, 1);
+    let fresh = daemon.respawn(restored.id, true, None, None, true).unwrap();
+    assert_ne!(fresh.id, restored.id);
+    assert_eq!(fresh.session_origin, Some(1));
     assert_eq!(fresh.cwd, tmp.path().display().to_string());
     assert_eq!(fresh.state, proto::SessionState::Running);
 }

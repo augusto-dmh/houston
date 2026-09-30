@@ -117,6 +117,21 @@ Environment set on the child, in order:
 | `TR_SESSION` | session id | what a hook client reads to correlate |
 | `HOUSTON_SHELL_INTEGRATION_TOKEN_FILE` | path to the marker capability | shell panes with integration on; the rc reads it once and unlinks it |
 
+A Claude pane launched without `--resume` gets `--session-id <uuid v4>`, recorded as its
+conversation id before any hook arrives. `respawn_with` decides what a respawned pane runs:
+`Restore` (boot) and `Resume` (a Restart) pass `launch::resume_args` for the pane's resume
+handle once `resume_check` passes (transcript metadata, recorded cwd, profile, no other live
+pane on the id); otherwise, and for `Fresh`, the pane starts a fresh CLI. A failed check, or
+a resumed CLI exiting non-zero within `RESUME_EARLY_EXIT` (10 s: an unknown id exits 1 at
+once), relaunches it fresh once with `SessionInfo.resume_notice`. Transient failures keep
+the handle for retry; a changed cwd, deleted profile or changed profile configuration
+directory clears it before creating the new
+row. Codex uses `resume <id>` with the ID and transcript path supplied by native hooks.
+The resolved profile directory is recorded at launch; hooks cannot move that session's
+conversation into an edited or recreated profile's account namespace.
+Clean shutdown and crash both apply the same restore policy and budget, preserving the
+previous crash in the recovery summary.
+
 `mint_mcp_launch` (`mcp_launch.rs`) adds the per-pane MCP argv and env; `shellint::injection`
 adds the rcfile args and env when shell integration is on. `env_hygiene::scrub()` has already
 removed inherited agent-session *identity* markers from the daemon's own environment at
@@ -389,7 +404,8 @@ Cursor and Antigravity.
 A routine is a standalone record: a prompt, a cadence and its own execution settings.
 Every firing, scheduled or by hand, runs the same path: a fresh terminal pane in the
 routine's `workspace_id`, on the routine's `engine`/`model`/`effort`, under its
-`permission_mode` and `isolate` flags. There is no conversation and no `--resume`; the
+`permission_mode` and `isolate` flags. There is no conversation and no `--resume`, and a run's
+pane never gets a resume handle; the
 pane is observed through its `RoutineRun` row and can be opened from the routine's history.
 
 - **Every run is a `RoutineRun` row** (`routine_runs`), independent of any conversation:
@@ -416,7 +432,7 @@ pane is observed through its `RoutineRun` row and can be opened from the routine
 
 The `settings` table is a plain string KV store. Live keys: `session_idle_reap_enabled` and
 `session_idle_reap_minutes` (≤ 40 000), `keymap_overrides`, `skill_sync_auto_push`,
-`command_history_ignore_globs`, `voice_settings`, `restore_budget`,
+`command_history_ignore_globs`, `voice_settings`, `restore_budget`, `restore_resume`,
 `mailbox_retention_hours`, `orchestration_max_live_children` and
 `orchestration_max_spawn_depth` (both ≤ `proto::ORCHESTRATION_CAP_MAX`).
 

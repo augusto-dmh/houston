@@ -26,6 +26,9 @@ const PTY_READ_BUF: usize = 16 * 1024;
 const MAX_TITLE_LEN: usize = 40;
 const IDLE_POLL_MS: u64 = 50;
 const SPAWN_GRACE: Duration = Duration::from_secs(20);
+/// A resumed CLI that exits non-zero this soon rejected its conversation (an unknown
+/// id exits 1 at once); the pane is relaunched fresh rather than left exited.
+const RESUME_EARLY_EXIT: Duration = Duration::from_secs(10);
 
 // observed Codex Auto-mode approval reviews took 4-6s; covers the worst observed
 // with margin so a review that resolves on its own never reaches the parent as a block
@@ -1051,6 +1054,7 @@ pub struct Daemon {
     /// Last transcript path and native id written per session, so a drop
     /// repeating them costs no write.
     transcript_links: Mutex<HashMap<u32, TranscriptLink>>,
+    resume_launches: Mutex<HashMap<u32, Instant>>,
     routine_settle: Mutex<HashMap<u32, DelegationSettleSample>>,
     routine_pane_cmd_override: Mutex<Option<Vec<String>>>,
     routine_pane_registration_hook_for_test: Mutex<Option<RoutinePaneRegistrationHook>>,
@@ -1354,6 +1358,8 @@ fn format_rfc3339_utc(unix_ms: u64) -> String {
 
 const RESTORE_BUDGET_KEY: &str = "restore_budget";
 
+const RESTORE_RESUME_KEY: &str = "restore_resume";
+
 const MAILBOX_RETENTION_HOURS_KEY: &str = "mailbox_retention_hours";
 
 const ORCHESTRATION_MAX_LIVE_CHILDREN_KEY: &str = "orchestration_max_live_children";
@@ -1649,6 +1655,25 @@ struct SpawnParams {
     acp: Option<String>,
     profile_label: Option<String>,
     session_origin: Option<u32>,
+    /// The conversation the new row carries: resumed now, or kept for a later Restart.
+    resume_handle: Option<ResumeHandle>,
+    resume_notice: Option<String>,
+}
+
+/// A conversation id and the transcript path the CLI reported with it.
+type ResumeHandle = (String, Option<String>);
+
+/// What a respawn does with the conversation the old pane was running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RespawnConversation {
+    /// Resume it when its handle passes validation (a Restart).
+    Resume,
+    /// Resume it only while the `restore_resume` setting is on (boot restore).
+    Restore,
+    /// Start a fresh CLI and forget the conversation.
+    Fresh,
+    /// Start a fresh CLI, keep the conversation, and tell the user why.
+    Fallback(String),
 }
 
 type ProfileSpawnEnv = (Option<(String, String)>, Option<String>);
@@ -2281,6 +2306,7 @@ impl Daemon {
             browser_relay: Arc::new(crate::browser_relay::BrowserRelayState::new()),
             routine_runs: Mutex::new(HashMap::new()),
             transcript_links: Mutex::new(HashMap::new()),
+            resume_launches: Mutex::new(HashMap::new()),
             routine_settle: Mutex::new(HashMap::new()),
             routine_pane_cmd_override: Mutex::new(None),
             routine_pane_registration_hook_for_test: Mutex::new(None),
@@ -2384,28 +2410,16 @@ impl Daemon {
         );
 
         let safe_mode = self.safe_mode_flags.disable_auto_restore;
-        if safe_mode || crashed {
-            let reason = if safe_mode {
-                R::SafeMode
-            } else {
-                R::PreviousCrash
-            };
+        if safe_mode {
             for c in &candidates {
-                defer(c.id, reason);
+                defer(c.id, R::SafeMode);
             }
             *self.recovery.lock().expect("recovery lock") = Some(proto::RecoverySummary {
                 respawned: 0,
                 deferred: total,
                 crashed,
             });
-            tracing::info!(
-                "boot restore: deferred all {total} husk(s) ({})",
-                if safe_mode {
-                    "safe mode"
-                } else {
-                    "previous crash"
-                }
-            );
+            tracing::info!("boot restore: deferred all {total} husk(s) (safe mode)");
             return;
         }
 
@@ -2455,7 +2469,7 @@ impl Daemon {
                 defer(c.id, R::Budget);
                 continue;
             }
-            match self.respawn(c.id, true, None, None, false) {
+            match self.respawn_with(c.id, true, None, None, false, RespawnConversation::Restore) {
                 Ok(_) => respawned += 1,
                 Err(e) => {
                     tracing::warn!(
@@ -2471,7 +2485,7 @@ impl Daemon {
         *self.recovery.lock().expect("recovery lock") = Some(proto::RecoverySummary {
             respawned,
             deferred,
-            crashed: false,
+            crashed,
         });
         tracing::info!("boot restore: respawned {respawned}, deferred {deferred}");
     }
@@ -3377,6 +3391,8 @@ impl Daemon {
             inbox_unread: 0,
             tags: m.tags.clone(),
             session_origin: None,
+            resumable: false,
+            resume_notice: None,
         };
         let vt = adopted_emulator(m);
         Arc::new(Session {
@@ -4223,6 +4239,18 @@ impl Daemon {
             _ => unreachable!("agent_profile_slug already restricted to claude/codex"),
         }
         .to_string()
+    }
+
+    fn agent_profile_config_dir(agent: proto::AgentKind, env: &[(String, String)]) -> Option<&str> {
+        let key = match agent {
+            proto::AgentKind::Claude => "CLAUDE_CONFIG_DIR",
+            proto::AgentKind::Codex => "CODEX_HOME",
+            _ => return None,
+        };
+        env.iter()
+            .rev()
+            .find(|(name, _)| name == key)
+            .map(|(_, directory)| directory.as_str())
     }
 
     fn expand_profile_dir(&self, slug: &str, raw: String) -> String {
@@ -6078,6 +6106,7 @@ impl Daemon {
                         hold,
                     )
                 });
+                info.resumable = matches!(self.db.session_resume_handle(info.id), Ok(Some(_)));
                 info.inbox_unread = self.db.inbox_pending_count(info.id).unwrap_or_else(|e| {
                     tracing::warn!("reading inbox_unread for session {}: {e}", info.id);
                     0
@@ -6301,6 +6330,8 @@ impl Daemon {
             profile_label,
             tags: Vec::new(),
             session_origin: None,
+            resume_handle: None,
+            resume_notice: None,
         })?;
         self.record_approval_mode(info.id, approval);
         Ok(info)
@@ -6513,6 +6544,25 @@ impl Daemon {
         shell_override: Option<String>,
         force: bool,
     ) -> Result<proto::SessionInfo> {
+        self.respawn_with(
+            old_id,
+            shell_integration,
+            cwd_override,
+            shell_override,
+            force,
+            RespawnConversation::Resume,
+        )
+    }
+
+    pub fn respawn_with(
+        self: &Arc<Self>,
+        old_id: u32,
+        shell_integration: bool,
+        cwd_override: Option<PathBuf>,
+        shell_override: Option<String>,
+        force: bool,
+        conversation: RespawnConversation,
+    ) -> Result<proto::SessionInfo> {
         if let Some(dir) = &cwd_override {
             if !dir.is_dir() {
                 bail!(
@@ -6565,6 +6615,16 @@ impl Daemon {
                 a.swarm
             );
         }
+        // Read before a forced restart kills the pane, which clears the handle.
+        let handle = self.db.session_resume_handle(old_id).unwrap_or_else(|e| {
+            tracing::warn!("reading session {old_id}'s resume handle: {e:#}");
+            None
+        });
+        let recorded_profile_dir = if handle.is_some() {
+            self.db.session_profile_config_dir(old_id)?
+        } else {
+            None
+        };
         let from_live = self
             .sessions
             .lock()
@@ -6666,9 +6726,55 @@ impl Daemon {
             );
         }
 
-        let (extra_env, profile_label) = self.respawn_profile(old_id, agent, profile_label);
+        let had_profile = profile_label.is_some();
+        let (extra_env, profile_label, missing_profile) =
+            self.respawn_profile(old_id, agent, profile_label);
+        let profile_dir = Self::agent_profile_config_dir(agent, &extra_env);
+        let profile_changed = recorded_profile_dir.as_deref() != profile_dir
+            || (had_profile && recorded_profile_dir.is_none());
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let cwd = Self::respawn_cwd(cwd_override, &cwd, &project_dir);
+        let recorded_cwd = cwd;
+        let cwd = Self::respawn_cwd(cwd_override, &recorded_cwd, &project_dir);
+        let (extra_args, resume_handle, resume_notice) = match conversation {
+            RespawnConversation::Fresh => (Vec::new(), None, None),
+            RespawnConversation::Fallback(notice) => (Vec::new(), handle, Some(notice)),
+            RespawnConversation::Restore if !self.restore_resume() => (Vec::new(), handle, None),
+            RespawnConversation::Resume | RespawnConversation::Restore => match &handle {
+                Some(h) if acp.is_none() => match if profile_changed && missing_profile.is_none() {
+                    Err(format!(
+                        "agent profile {:?} configuration changed from {:?} to {:?}, so conversation {} is not resumed on another account",
+                        profile_label.as_deref().unwrap_or("default"),
+                        recorded_profile_dir,
+                        profile_dir,
+                        h.0
+                    ))
+                } else {
+                    self.resume_check(
+                        old_id,
+                        agent,
+                        h,
+                        &recorded_cwd,
+                        &cwd,
+                        missing_profile.as_deref(),
+                    )
+                } {
+                    Ok(args) => (args, handle, None),
+                    Err(reason) => {
+                        tracing::info!("session {old_id} starts fresh: {reason}");
+                        (
+                            Vec::new(),
+                            handle,
+                            Some(format!("Started a fresh CLI: {reason}")),
+                        )
+                    }
+                },
+                _ => (Vec::new(), None, None),
+            },
+        };
+        // A fresh launch in another conversation namespace cannot carry its old handle.
+        let resume_handle = resume_handle.filter(|_| {
+            missing_profile.is_none() && !profile_changed && cwd == Path::new(&recorded_cwd)
+        });
         let spawned = self.spawn_session(SpawnParams {
             id,
             agent,
@@ -6685,13 +6791,15 @@ impl Daemon {
             shell_override,
             swarm_agent: None,
             spawned_by,
-            extra_args: Vec::new(),
+            extra_args,
             extra_env,
             wrap: None,
             acp,
             profile_label,
             tags: old_tags,
             session_origin: Some(self.db.session_origin(old_id)?),
+            resume_handle,
+            resume_notice,
         })?;
 
         if was_dead {
@@ -6718,25 +6826,261 @@ impl Daemon {
         Ok(spawned)
     }
 
-    /// The profile environment a respawned pane runs with. A label whose profile
-    /// is gone falls back to the default account and drops the label with it.
+    /// The profile environment a respawned pane runs with, and the label of a profile
+    /// that is gone: that pane falls back to the default account and drops the label.
     fn respawn_profile(
         &self,
         old_id: u32,
         agent: proto::AgentKind,
         label: Option<String>,
-    ) -> ProfileSpawnEnvList {
+    ) -> (Vec<(String, String)>, Option<String>, Option<String>) {
         let Some(label) = label else {
-            return (Vec::new(), None);
+            return (Vec::new(), None, None);
         };
-        self.resolve_named_profile(agent, &label)
-            .unwrap_or_else(|e| {
+        match self.resolve_named_profile(agent, &label) {
+            Ok((env, label)) => (env, label, None),
+            Err(e) => {
                 tracing::warn!(
                     "respawning session {old_id} on the default account without its profile \
                      label {label:?}: {e:#}"
                 );
-                (Vec::new(), None)
-            })
+                (Vec::new(), None, Some(label))
+            }
+        }
+    }
+
+    /// The argv that resumes `handle` in the respawned pane, or why it cannot. Reads
+    /// the transcript's metadata only, never its content.
+    fn resume_check(
+        &self,
+        old_id: u32,
+        agent: proto::AgentKind,
+        handle: &ResumeHandle,
+        recorded_cwd: &str,
+        cwd: &Path,
+        missing_profile: Option<&str>,
+    ) -> std::result::Result<Vec<String>, String> {
+        let (conversation, transcript) = handle;
+        let args = crate::launch::resume_args(agent, conversation).map_err(|e| format!("{e:#}"))?;
+        if let Some(label) = missing_profile {
+            return Err(format!(
+                "agent profile {label:?} no longer exists, so conversation {conversation} cannot be found"
+            ));
+        }
+        if !Path::new(recorded_cwd).is_dir() {
+            return Err(format!(
+                "folder {recorded_cwd} no longer exists, so conversation {conversation} is not resumed elsewhere"
+            ));
+        }
+        if cwd != Path::new(recorded_cwd) {
+            return Err(format!(
+                "folder changed from {recorded_cwd} to {}, so conversation {conversation} is not resumed elsewhere",
+                cwd.display()
+            ));
+        }
+        let Some(transcript) = transcript else {
+            return Err(format!(
+                "no transcript was reported for conversation {conversation}"
+            ));
+        };
+        match std::fs::metadata(transcript) {
+            Err(_) => return Err(format!("transcript {transcript} is missing")),
+            Ok(m) if m.len() == 0 => return Err(format!("transcript {transcript} is empty")),
+            Ok(_) => {}
+        }
+        let holders = self
+            .db
+            .sessions_naming_conversation(conversation)
+            .map_err(|e| format!("checking which panes hold conversation {conversation}: {e:#}"))?;
+        let sessions = self.sessions.lock().expect("sessions lock");
+        if let Some(other) = holders.into_iter().find(|id| {
+            *id != old_id
+                && sessions
+                    .get(id)
+                    .is_some_and(|s| s.state.lock().expect("state lock").is_live())
+        }) {
+            return Err(format!(
+                "conversation {conversation} is already open in session {other}"
+            ));
+        }
+        Ok(args)
+    }
+
+    /// Records the conversation a new pane starts in: the pre-assigned id of a fresh
+    /// Claude CLI, or the resumed one, plus the handle the row carries forward.
+    fn record_launch_conversation(
+        &self,
+        id: u32,
+        resumed: bool,
+        preassigned: Option<String>,
+        handle: Option<ResumeHandle>,
+    ) {
+        if let Some((conversation, transcript)) = &handle {
+            if let Err(e) = self
+                .db
+                .set_session_resume_handle(id, Some((conversation, transcript.as_deref())))
+            {
+                tracing::warn!("carrying the resume handle to session {id}: {e:#}");
+            }
+        }
+        let link = if resumed {
+            handle.map(|(conversation, transcript)| (transcript, Some(conversation)))
+        } else {
+            preassigned.map(|conversation| (None, Some(conversation)))
+        };
+        if let Some(link) = link {
+            match self
+                .db
+                .update_session_transcript_link(id, link.0.as_deref(), link.1.as_deref())
+            {
+                Ok(()) => {
+                    self.transcript_links
+                        .lock()
+                        .expect("transcript links lock")
+                        .insert(id, link);
+                }
+                Err(e) => tracing::warn!("recording session {id}'s conversation: {e:#}"),
+            }
+        }
+        if resumed {
+            self.resume_launches
+                .lock()
+                .expect("resume launches lock")
+                .insert(id, Instant::now());
+        }
+    }
+
+    /// A resumed CLI that exits non-zero within `RESUME_EARLY_EXIT` is relaunched fresh
+    /// in its slot, once: the relaunch has no `--resume`, so it cannot loop.
+    fn resume_exited(self: &Arc<Self>, id: u32, exit_code: Option<i32>) {
+        let Some(launched) = self
+            .resume_launches
+            .lock()
+            .expect("resume launches lock")
+            .remove(&id)
+        else {
+            return;
+        };
+        let elapsed = launched.elapsed();
+        if exit_code == Some(0) || elapsed >= RESUME_EARLY_EXIT || self.is_shutting_down() {
+            return;
+        }
+        let killed = self
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .get(&id)
+            .is_none_or(|s| *s.state.lock().expect("state lock") == proto::SessionState::Killed);
+        if killed {
+            return;
+        }
+        let code = exit_code.map_or_else(|| "no code".to_string(), |c| format!("code {c}"));
+        let notice = format!(
+            "Started a fresh CLI: the resumed agent exited with {code} within {} s",
+            RESUME_EARLY_EXIT.as_secs()
+        );
+        tracing::info!("session {id}: {notice}");
+        if let Err(e) = self.respawn_with(
+            id,
+            true,
+            None,
+            None,
+            false,
+            RespawnConversation::Fallback(notice),
+        ) {
+            tracing::warn!("relaunching session {id} fresh after its resume failed: {e:#}");
+        }
+    }
+
+    /// Promotes the pane's current root conversation to its resume handle once that
+    /// conversation has a turn: a startup or `/clear` id without one has no transcript.
+    fn note_resume_turn(
+        &self,
+        id: u32,
+        session: &Session,
+        provider: proto::AgentKind,
+        d: &crate::hook_drop::HookDrop,
+    ) {
+        use crate::agent_events::AgentEvent;
+        // Serialize handle promotion with Kill/Close so a queued hook cannot
+        // restore a handle after the operator has cleared it.
+        let operator_ended = self.operator_ended.lock().expect("operator_ended lock");
+        if session.removed.load(Ordering::Acquire)
+            || *session.state.lock().expect("state lock") == proto::SessionState::Killed
+            || operator_ended.contains(&id)
+        {
+            return;
+        }
+        let turn = matches!(
+            AgentEvent::from_provider(provider, &d.event),
+            Some(AgentEvent::PromptSubmitted | AgentEvent::TurnEnded)
+        );
+        if !turn
+            || session.info.acp.is_some()
+            || !crate::agent_events::names_root_conversation(provider, &d.event)
+        {
+            return;
+        }
+        let Some(conversation) = d.session_id.as_deref().filter(|c| !c.is_empty()) else {
+            return;
+        };
+        if crate::launch::resume_args(session.info.agent, conversation).is_err() {
+            return;
+        }
+        let (transcript, current) = self
+            .transcript_links
+            .lock()
+            .expect("transcript links lock")
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        if current.as_deref() != Some(conversation) {
+            return;
+        }
+        match self.db.is_routine_run_session(id) {
+            Ok(false) => {}
+            Ok(true) => return,
+            Err(e) => {
+                tracing::warn!("checking whether session {id} is a routine run: {e:#}");
+                return;
+            }
+        }
+        let previous = self.db.session_resume_handle(id).unwrap_or_else(|e| {
+            tracing::warn!("reading session {id}'s resume handle: {e:#}");
+            None
+        });
+        let next = (conversation.to_string(), transcript);
+        if previous.as_ref() == Some(&next) {
+            return;
+        }
+        if let Err(e) = self
+            .db
+            .set_session_resume_handle(id, Some((&next.0, next.1.as_deref())))
+        {
+            tracing::warn!("recording session {id}'s resume handle: {e:#}");
+            return;
+        }
+        if previous.is_none() {
+            self.broadcast_control(&proto::ServerMsg::SessionResumable {
+                session: id,
+                resumable: true,
+            });
+        }
+    }
+
+    /// An explicit kill or close ends the conversation: nothing resumes it later.
+    fn forget_resume_handle(&self, id: u32) {
+        match self.db.session_resume_handle(id) {
+            Ok(None) => {}
+            Ok(Some(_)) => match self.db.set_session_resume_handle(id, None) {
+                Ok(()) => self.broadcast_control(&proto::ServerMsg::SessionResumable {
+                    session: id,
+                    resumable: false,
+                }),
+                Err(e) => tracing::warn!("clearing session {id}'s resume handle: {e:#}"),
+            },
+            Err(e) => tracing::warn!("reading session {id}'s resume handle: {e:#}"),
+        }
     }
 
     fn flush_shell_token_redactor(self: &Arc<Self>, id: u32, session: &Arc<Session>) {
@@ -6965,6 +7309,8 @@ impl Daemon {
             acp,
             profile_label,
             session_origin,
+            resume_handle,
+            resume_notice,
         } = p;
         let pty = native_pty_system();
         let pair = pty
@@ -7097,8 +7443,22 @@ impl Daemon {
                 );
             }
         }
+        let resumed = match agent {
+            proto::AgentKind::Claude => extra_args.iter().any(|a| a == "--resume"),
+            proto::AgentKind::Codex => extra_args.first().is_some_and(|a| a == "resume"),
+            _ => false,
+        };
+        let preassigned = (agent == proto::AgentKind::Claude
+            && acp.is_none()
+            && custom_cmd.is_none()
+            && !hidden
+            && !resumed)
+            .then(|| uuid::Uuid::new_v4().to_string());
         for a in &extra_args {
             cmd.arg(a);
+        }
+        if let Some(conversation) = &preassigned {
+            cmd.args(["--session-id", conversation]);
         }
         let mcp = self.mint_mcp_launch(id, agent, &project_dir);
         for a in &mcp.args {
@@ -7203,6 +7563,8 @@ impl Daemon {
             inbox_unread: 0,
             tags: p_tags.clone(),
             session_origin: Some(session_origin.unwrap_or(id)),
+            resumable: resume_handle.is_some(),
+            resume_notice,
         };
 
         let session = Arc::new(Session {
@@ -7264,6 +7626,11 @@ impl Daemon {
         if !hidden {
             self.db
                 .insert_session_with_title_source(&info, Some(title_source.as_str()))?;
+            self.db.set_session_profile_config_dir(
+                id,
+                Self::agent_profile_config_dir(agent, &extra_env),
+            )?;
+            self.record_launch_conversation(id, resumed, preassigned, resume_handle);
             self.broadcast_control(&proto::ServerMsg::SessionCreated { info: info.clone() });
         }
 
@@ -7311,6 +7678,7 @@ impl Daemon {
                 }
                 daemon.delegation_child_exited(id);
                 daemon.routine_pane_exited(id);
+                daemon.resume_exited(id, exit_code);
             })
             .expect("spawn pty wait thread");
 
@@ -7565,6 +7933,8 @@ impl Daemon {
             inbox_unread: 0,
             tags: Vec::new(),
             session_origin: None,
+            resumable: false,
+            resume_notice: None,
         };
         let session = Arc::new(Session {
             info: info.clone(),
@@ -8302,8 +8672,11 @@ impl Daemon {
             .lock()
             .expect("operator_ended lock")
             .insert(id);
+        self.forget_resume_handle(id);
         self.cancel_delegation(id);
         *session.state.lock().expect("state lock") = proto::SessionState::Killed;
+        self.db
+            .update_session_state(id, proto::SessionState::Killed, None)?;
         let result = session.backend.kill(id, session.pid);
         self.reap_reevaluate();
         result
@@ -8381,11 +8754,13 @@ impl Daemon {
             .lock()
             .expect("operator_ended lock")
             .insert(id);
+        self.forget_resume_handle(id);
         self.cancel_delegation(id);
         let removed = self.sessions.lock().expect("sessions lock").remove(&id);
         if let Some(session) = removed {
             session.remove_shell_token_file();
             session.removed.store(true, Ordering::Release);
+            self.db.mark_closed(id)?;
             self.write_run_state();
             if session.state.lock().expect("state lock").is_live() {
                 let _ = session.backend.kill(id, session.pid);
@@ -8877,6 +9252,8 @@ impl Daemon {
             profile_label: None,
             tags: Vec::new(),
             session_origin: None,
+            resume_handle: None,
+            resume_notice: None,
         });
         if let Err(e) = spawned {
             self.handoff_jobs
@@ -9242,6 +9619,7 @@ impl Daemon {
         if let Some(session) = session {
             self.mark_detected(d.session, &session, provider);
             self.note_transcript_link(d.session, provider, d);
+            self.note_resume_turn(d.session, &session, provider, d);
         }
         self.note_hook_last_message(
             d.session,
@@ -10260,6 +10638,20 @@ impl Daemon {
         }
     }
 
+    /// Whether boot restore resumes each pane's conversation; on unless turned off.
+    pub fn restore_resume(&self) -> bool {
+        match self.db.get_setting(RESTORE_RESUME_KEY) {
+            Ok(Some(v)) => v != "0",
+            _ => true,
+        }
+    }
+
+    pub fn set_restore_resume(&self, enabled: bool) -> Result<bool> {
+        self.db
+            .set_setting(RESTORE_RESUME_KEY, if enabled { "1" } else { "0" })?;
+        Ok(enabled)
+    }
+
     pub fn set_restore_budget(&self, budget: u32) -> Result<u32> {
         if budget > proto::RESTORE_BUDGET_MAX {
             bail!(
@@ -10374,6 +10766,7 @@ impl Daemon {
             uptime_ms: self.started.elapsed().as_millis() as u64,
             live_sessions,
             restore_budget: self.restore_budget(),
+            restore_resume: self.restore_resume(),
             restore_deferred,
             orchestration_depth_in_use,
             orchestration_max_depth: self.orchestration_max_spawn_depth(),
@@ -12324,6 +12717,8 @@ impl Daemon {
             profile_label,
             tags: Vec::new(),
             session_origin: None,
+            resume_handle: None,
+            resume_notice: None,
         });
         let info = spawned?;
         self.record_approval_mode(sid, requested_mode);
@@ -16425,6 +16820,92 @@ mod handoff_refusal_tests {
 
     fn spare_fd() -> std::net::TcpListener {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap()
+    }
+
+    fn persistent_ssh_session(daemon: &Daemon, state: &Path, id: u32) -> Arc<Session> {
+        let mut manifest = manifest_entry(id);
+        manifest.agent = proto::AgentKind::Ssh;
+        manifest.project_dir = state.display().to_string();
+        manifest.cwd = manifest.project_dir.clone();
+        let session =
+            Daemon::adopted_session(&manifest, Backend::Ssh(crate::ssh::SshHandle::stub()));
+        daemon.db.insert_session(&session.info).unwrap();
+        daemon
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .insert(id, session.clone());
+        session
+    }
+
+    #[test]
+    fn kill_is_durable_before_the_backend_reports_completion() {
+        let (daemon, state) = test_daemon();
+        let session = persistent_ssh_session(&daemon, state.path(), 7);
+
+        daemon.kill(7).unwrap();
+
+        assert!(!session.backend_exited.load(Ordering::Acquire));
+        assert_eq!(
+            daemon.db.session_final(7).unwrap(),
+            Some((proto::SessionState::Killed, None)),
+            "kill must persist the operator's decision before an asynchronous waiter finishes"
+        );
+        drop(session);
+        drop(daemon);
+
+        let reopened = Db::open(&state.path().join("t.db")).unwrap();
+        assert_eq!(reopened.mark_live_as_interrupted().unwrap(), 0);
+        assert!(reopened.list_interrupted().unwrap().is_empty());
+        assert_eq!(
+            reopened.session_final(7).unwrap(),
+            Some((proto::SessionState::Killed, None)),
+            "crash recovery must not turn an explicitly killed pane into a restore candidate"
+        );
+    }
+
+    #[test]
+    fn close_is_durable_before_the_backend_reports_completion() {
+        let (daemon, state) = test_daemon();
+        let session = persistent_ssh_session(&daemon, state.path(), 7);
+
+        daemon.close(7).unwrap();
+
+        assert!(!session.backend_exited.load(Ordering::Acquire));
+        assert!(
+            daemon.db.session_is_closed(7).unwrap(),
+            "removing a live pane must close its durable row before its asynchronous waiter finishes"
+        );
+        assert!(!daemon.list().iter().any(|info| info.id == 7));
+        drop(session);
+        drop(daemon);
+
+        let reopened = Db::open(&state.path().join("t.db")).unwrap();
+        assert_eq!(reopened.mark_live_as_interrupted().unwrap(), 0);
+        assert!(reopened.list_interrupted().unwrap().is_empty());
+        assert!(
+            reopened.session_is_closed(7).unwrap(),
+            "crash recovery must keep the removed pane closed"
+        );
+    }
+
+    #[test]
+    fn a_late_backend_completion_keeps_a_closed_pane_closed() {
+        let (daemon, state) = test_daemon();
+        let session = persistent_ssh_session(&daemon, state.path(), 7);
+        daemon.close(7).unwrap();
+        assert!(!session.backend_exited.load(Ordering::Acquire));
+
+        daemon.finish_session(7, Some(0));
+
+        assert!(
+            daemon.db.session_is_closed(7).unwrap(),
+            "a late waiter must not overwrite the operator's durable close with exited"
+        );
+        drop(session);
+        drop(daemon);
+        let reopened = Db::open(&state.path().join("t.db")).unwrap();
+        assert!(reopened.session_is_closed(7).unwrap());
     }
 
     #[test]

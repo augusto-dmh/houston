@@ -1,4 +1,4 @@
-# Wire protocol v118
+# Wire protocol v119
 
 Transport: one WebSocket at `ws://127.0.0.1:<port>/ws`, served by the daemon
 (`core/houston-core/src/server.rs`). Auth: a bearer token in the first message —
@@ -94,7 +94,7 @@ failure not given a typed refusal comes back as `error`.
 | `session_create` | `agent: AgentKind`, `project_dir`, `cmd?: string[]` (required for `custom`), `cols?`/`rows?` (default 80×24), `cwd_from?: u32` (start in that session's live cwd), `shell_integration?` (default true), `auto_approve?` (default false; refused for a kind with no bypass flag), `acp?` (slug from the ACP roster; refused with `cmd`), `profile?: ProfileChoice`, `prompt?` (initial task, delivered as argv, or as a `.houston/prompts/` file the child is told to read once it is over the argv-safe threshold) | `session_created` (bcast); this socket starts receiving that session's frames |
 | `session_kill` | `session`, `confirm_children?` | `session_state` (bcast); refused `live_children_confirmation_required:` when the pane has live children and `confirm_children` is not set |
 | `session_close` | `session`, `confirm_children?` | `session_removed` (bcast); same children refusal |
-| `session_respawn` | `session`, `shell_integration?`, `cwd?` (must exist), `shell?` (absolute shell binary, shell panes only), `force?` (restart a still-live session: kill, reap, respawn — without it a live session is refused by name) | broadcasts; a failed spawn leaves the husk intact |
+| `session_respawn` | `session`, `shell_integration?`, `cwd?` (must exist), `shell?` (absolute shell binary, shell panes only), `force?` (restart a still-live session: kill, reap, respawn — without it a live session is refused by name), `fresh?` (v119: start a fresh CLI and forget the conversation; absent, a Claude session with a valid resume handle is relaunched with `--resume <id>`, and one whose handle fails validation starts fresh with `resume_notice` set) | broadcasts; a failed spawn leaves the husk intact |
 | `session_resize` | `session`, `cols`, `rows` | `session_resized` (direct) |
 | `session_list` | — | `session_list` (direct) |
 | `session_attach` | `session`, `replay_bytes?` (cap the tail; omitted = whole ring), `snapshot?` (v94: ask for emulator state instead of a byte replay) | `scrollback` **or** `attach_snapshot` (direct), numbered by `attempt`; this socket starts receiving that session's frames, and nothing below the reply's cutoff follows it. `snapshot: true` is answered with `attach_snapshot` when the daemon has an emulator and could encode one, and with `scrollback` otherwise — a client must handle either reply |
@@ -298,6 +298,7 @@ failure not given a typed refusal comes back as `error`.
 |---|---|---|
 | `host_info_get` | — | `host_info` (direct), never a broadcast — a point-in-time snapshot the client re-polls (~30 s is the recommended cadence) |
 | `restore_budget_set` | `budget` (`0..=RESTORE_BUDGET_MAX`) | `host_info` (bcast); out of range is an `error` naming ceiling and value |
+| `restore_resume_set` | `enabled` (v119: whether boot restore resumes each pane's conversation; on by default) | `host_info` (bcast) |
 | `mailbox_retention_set` | `hours` (`1..=MAILBOX_RETENTION_HOURS_MAX`) | `host_info` (bcast); same refusal shape |
 | `usage_summary_get` | `since_ms` (inclusive), `until_ms` (exclusive), `refresh_pricing?` | `usage_summary` (direct), never a broadcast. A half-open instant range: the daemon has no time zone, so the client converts local days to instants and back. Refused when `until_ms <= since_ms` or the span exceeds `USAGE_MAX_WINDOW_DAYS` |
 | `browser_tool_result` | `request_id`, `ok`, `output?: JSON`, `error?` | reply to a `browser_tool_call` this connection received — the browser-tool relay's app-to-daemon half (v93, Detach). Ignored if the daemon is no longer waiting on `request_id` |
@@ -316,6 +317,7 @@ failure not given a typed refusal comes back as `error`.
 | `session_resized` | `session`, `cols`, `rows` | direct reply. Dims are read back from the PTY for live local sessions; SSH and dead sessions echo the request |
 | `session_renamed` | `session`, `title` | bcast after `session_rename` |
 | `session_tags_set` | `session`, `tags: u32[]` | v100: bcast after `session_set_tags` — the whole set, client replaces |
+| `session_resumable` | `session`, `resumable` | v119: bcast when a live session gains its first resume handle (a turn in its root conversation) or loses it (kill, close) |
 | `tag_list` | `tags: TagInfo[]` | v100: bcast after any `tag_*` mutation; whole registry, client replaces |
 | `tag_deleted` | `tag` | v100: bcast beside the `tag_list` that follows a delete — clients holding the id (a tag filter) clean up without diffing |
 | `session_reparented` | `session`, `project_dir` | bcast — a session moved to another workspace |
@@ -421,7 +423,10 @@ SessionInfo        id, agent: AgentKind, project_dir, cwd (the actual run dir), 
                    tags (v100: tag ids in application order; resolved against the tag registry —
                    ids, never names, so a rename/recolor needs no session rewrite),
                    session_origin? (v118: original session id persisted across `session_respawn` and
-                   boot restore; clients retain the pane across missed replacements)
+                   boot restore; clients retain the pane across missed replacements),
+                   resumable (v119: the session holds a resume handle, so a Restart without `fresh`
+                   resumes its conversation), resume_notice? (v119: why this session started fresh
+                   instead of resuming; held in memory for the session's life)
 DelegationInfo     parent, role?, state: DelegationState, stalled, result_staged, superseded, ended_at?,
                    stop_reason?, turn_end_source: TurnEndSource, inbox_owed, inbox_provisional,
                    last_result_corrected_by?, capability_note?, hold_reason?, reusable (v98: what the child
@@ -572,7 +577,7 @@ ChatEffort         low | medium | high | xhigh | max
 ChatPermissionMode accept_edits | bypass_permissions
 
 HostInfo           channel, state_dir, pid, port, protocol_version, app_version, build_commit, uptime_ms,
-                   live_sessions, restore_budget, restore_deferred, orchestration_depth_in_use,
+                   live_sessions, restore_budget, restore_resume, restore_deferred, orchestration_depth_in_use,
                    orchestration_max_depth, mailbox_files_on_disk, mailbox_retention_hours,
                    command_history_ignore_glob_count, session_db_bytes
 
@@ -875,6 +880,7 @@ Only the current window; older bumps live in git history.
 
 | Version | What changed |
 |---|---|
+| 119 | **Restored or restarted Claude and Codex panes resume their conversations.** `SessionInfo` gains `resumable` and `resume_notice?`; `session_respawn` gains `fresh?`; new `restore_resume_set` (reply: `host_info` bcast, which gains `restore_resume`) and `session_resumable` bcast. Boot restore after shutdown or crash and `session_respawn` relaunch a Claude session with `--resume <id>` or Codex with `resume <id>` when it holds a resume handle that passes validation, and start fresh with a one-line `resume_notice` otherwise |
 | 118 | **A restarted session keeps its original pane.** `SessionInfo` gains `session_origin`, the original session id persisted across successive restarts and boot restores. Clients retain the pane in any grid or stack even when they missed intermediate replacements. No message is added or removed |
 | 117 | **Harness review results have their own view.** New `harness_state`, `harness_routine_create`, `harness_report` and `harness_decide` client messages and `harness_state`, `harness_report` and `harness_changed` replies, with `HarnessReview`, `HarnessReviewStatus`, `HarnessFinding` and `HarnessFindingState`. A review run publishes with the `harness_publish` MCP tool or `hs-harness publish`, offered only to its own pane, instead of `pane_submit` to the operator's inbox; the daemon stores the run, its findings and the operator's decisions per workspace. The state includes native Claude and Codex model options from the shared local catalog, which describes metadata rather than account availability. No existing message changes |
 | 116 | **The notification feed is removed.** Gone from the wire: the server's `agent_notice` broadcast and the `AgentNoticeKind` enum. `agent_status` keeps carrying every lifecycle change (working, idle, needs-input) and the orchestration inbox messages (`inbox_list`/`inbox_ack`/`inbox_resolve`/`inbox_deliver_now`, `inbox_rows`, `inbox_changed`) are unchanged; there is simply no separate attention feed for a client notification center |

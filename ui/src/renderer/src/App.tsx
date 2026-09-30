@@ -409,7 +409,8 @@ type RosterPatchMsg = Extract<
       | "session_reparented"
       | "live_children_changed"
       | "delegation_changed"
-      | "session_tags_set";
+      | "session_tags_set"
+      | "session_resumable";
   }
 >;
 
@@ -419,6 +420,7 @@ const ROSTER_PATCH_TYPES: ReadonlySet<ServerMsg["type"]> = new Set([
   "live_children_changed",
   "delegation_changed",
   "session_tags_set",
+  "session_resumable",
 ]);
 
 function isRosterPatch(msg: ServerMsg): msg is RosterPatchMsg {
@@ -443,7 +445,9 @@ function patchRosterFields(
             }
           : msg.type === "session_tags_set"
             ? { tags: msg.tags }
-            : { delegation: msg.delegation };
+            : msg.type === "session_resumable"
+              ? { resumable: msg.resumable }
+              : { delegation: msg.delegation };
   return new Map(prev).set(msg.session, { ...cur, ...patch });
 }
 
@@ -3729,6 +3733,10 @@ export function App(): React.JSX.Element {
                       onRestoreBudgetSet={(n) => {
                         if (conn.kind === "ready")
                           conn.client.restoreBudgetSet(n);
+                      }}
+                      onRestoreResumeSet={(on) => {
+                        if (conn.kind === "ready")
+                          conn.client.restoreResumeSet(on);
                       }}
                       onMailboxRetentionSet={(hours) => {
                         if (conn.kind === "ready")

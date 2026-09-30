@@ -61,6 +61,8 @@ fn seed_husk(state_dir: &std::path::Path, dir: &std::path::Path) {
         inbox_unread: 0,
         tags: vec![],
         session_origin: None,
+        resumable: false,
+        resume_notice: None,
     })
     .unwrap();
 }
@@ -129,7 +131,7 @@ fn ungraceful_exit_reports_abnormal_exit_with_session_count_and_runtime() {
     let recovery = daemon2.recovery_summary().expect("husks present");
     assert!(
         recovery.crashed,
-        "must still defer as a crash: {recovery:?}"
+        "must still report the previous crash: {recovery:?}"
     );
 }
 

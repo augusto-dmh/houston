@@ -71,6 +71,7 @@ fn reparenting_a_restored_husk_persists_and_survives_a_reopen() {
     let new_dir = tempfile::tempdir().unwrap();
     {
         let db = Db::open(&db_path).unwrap();
+        db.set_setting("restore_budget", "0").unwrap();
         db.insert_session(&proto::SessionInfo {
             id: 50,
             agent: proto::AgentKind::Shell,
@@ -95,6 +96,8 @@ fn reparenting_a_restored_husk_persists_and_survives_a_reopen() {
             inbox_unread: 0,
             tags: vec![],
             session_origin: None,
+            resumable: false,
+            resume_notice: None,
         })
         .unwrap();
     }
@@ -163,6 +166,8 @@ fn reparent_refuses_a_swarm_tied_session() {
             inbox_unread: 0,
             tags: vec![],
             session_origin: None,
+            resumable: false,
+            resume_notice: None,
         })
         .unwrap();
         let roster = vec![proto::SwarmRosterEntry {

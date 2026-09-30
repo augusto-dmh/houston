@@ -93,6 +93,7 @@ function baseProps(): React.ComponentProps<typeof SettingsView> {
     onContact: () => {},
     onOpenLicense: () => {},
     onRestoreBudgetSet: () => {},
+    onRestoreResumeSet: () => {},
     sessionPolicy: null,
     onSessionPolicy: () => {},
     orchestrationEnabled: true,

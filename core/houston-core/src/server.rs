@@ -822,6 +822,9 @@ async fn dispatch(
         proto::ClientMsg::RestoreBudgetSet { budget } => daemon
             .set_restore_budget(budget)
             .map(|_| daemon.broadcast_control(&daemon.host_info())),
+        proto::ClientMsg::RestoreResumeSet { enabled } => daemon
+            .set_restore_resume(enabled)
+            .map(|_| daemon.broadcast_control(&daemon.host_info())),
         proto::ClientMsg::MailboxRetentionSet { hours } => daemon
             .set_mailbox_retention_hours(hours)
             .map(|_| daemon.broadcast_control(&daemon.host_info())),
@@ -1193,17 +1196,24 @@ async fn dispatch(
             cwd,
             shell,
             force,
+            fresh,
         } => {
             let frames_wanted =
                 frames_wanted.expect("an attach-family message runs on the connection task");
             let daemon = Arc::clone(daemon);
+            let conversation = if fresh.unwrap_or(false) {
+                crate::daemon::RespawnConversation::Fresh
+            } else {
+                crate::daemon::RespawnConversation::Resume
+            };
             tokio::task::spawn_blocking(move || {
-                daemon.respawn(
+                daemon.respawn_with(
                     session,
                     shell_integration.unwrap_or(true),
                     cwd.map(PathBuf::from),
                     shell,
                     force.unwrap_or(false),
+                    conversation,
                 )
             })
             .await
