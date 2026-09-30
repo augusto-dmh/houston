@@ -2119,6 +2119,10 @@ may hand off.
      pane then says which one it was, instead of a codename you have to look
      up. It has to be unique among your own live children, and it is free
      again once that pane is gone.
+   - **Give it a `--worktree SLUG`** when the child should work on its own
+     branch without touching this checkout: Houston creates
+     `.houston/worktrees/SLUG` on branch `houston/SLUG` (or `--branch B`),
+     records it, and starts the child there. Not with `--cwd`.
    - You do **not** need to tell the child to report back: a spawned pane is
      told by the daemon that `submit` is its end-of-turn. Spend the brief on
      the task instead.
@@ -2367,6 +2371,10 @@ hs-pane — a Houston pane controlling sibling agent panes
                 [--model M] [--cwd DIR] [--ask | --bypass] [--profile LABEL]
                 [--role NAME]          (unique among your live children)
                 [--target-workspace DIR] [--reusable]
+                [--worktree SLUG [--branch B]]
+                                       (start in a new worktree at
+                                        .houston/worktrees/SLUG, branch
+                                        houston/SLUG or B; not with --cwd)
                 [--handoff]            (an independent pane, not a child:
                                         no handback, and this pane may close)
                 [--effort low|medium|high|xhigh|max]
@@ -2556,6 +2564,12 @@ fn pane_cli_inner(args: &[String]) -> anyhow::Result<()> {
             }
             if let Some(target) = flags.get("target-workspace") {
                 body["target_workspace"] = json!(target);
+            }
+            if let Some(w) = flags.get("worktree") {
+                body["worktree"] = json!(w);
+            }
+            if let Some(b) = flags.get("branch") {
+                body["branch"] = json!(b);
             }
             if flags.contains_key("reusable") {
                 body["reusable"] = json!(true);
@@ -4526,6 +4540,109 @@ mod tests {
         ])
         .unwrap_err();
         assert!(format!("{err:#}").contains("until is gone"), "{err:#}");
+    }
+
+    /// Answers one request with `status`/`body` and hands back what the CLI sent.
+    fn one_shot_server(
+        status: &'static str,
+        body: &'static str,
+    ) -> (u16, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let port = listener.local_addr().expect("the listener address").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("one CLI request");
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).expect("the CLI request");
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(head_end) = text.find("\r\n\r\n") {
+                    let len = text[..head_end]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= head_end + 4 + len || n == 0 {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        (port, server)
+    }
+
+    #[test]
+    fn hs_pane_spawn_forwards_worktree_and_branch() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let (port, server) = one_shot_server("200 OK", r#"{"session_id":9}"#);
+        std::env::set_var("HOUSTON_SESSION", "1");
+        std::env::set_var("HOUSTON_MCP_URL", format!("http://127.0.0.1:{port}"));
+        std::env::set_var("HOUSTON_MCP_TOKEN", "unused");
+
+        pane_cli_inner(&[
+            "spawn".to_string(),
+            "--kind".to_string(),
+            "claude".to_string(),
+            "--prompt".to_string(),
+            "go".to_string(),
+            "--worktree".to_string(),
+            "demo".to_string(),
+            "--branch".to_string(),
+            "b".to_string(),
+        ])
+        .expect("a 200 spawn succeeds");
+
+        let request = server.join().expect("the server thread");
+        let body = &request[request.find("\r\n\r\n").expect("a body") + 4..];
+        let v: serde_json::Value = serde_json::from_str(body).expect("a JSON body");
+        assert!(request.starts_with("POST /orchestrate/spawn"), "{request}");
+        assert_eq!(v["worktree"], json!("demo"));
+        assert_eq!(v["branch"], json!("b"));
+    }
+
+    #[test]
+    fn hs_pane_spawn_reports_a_worktree_refusal_as_exit_1() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("HOUSTON_SESSION", "1");
+        std::env::set_var("HOUSTON_MCP_TOKEN", "unused");
+        let refusal = r#"{"error":"spawn refused: workspace /w is not a git repository, and a worktree needs one"}"#;
+        let args = [
+            "spawn".to_string(),
+            "--kind".to_string(),
+            "claude".to_string(),
+            "--prompt".to_string(),
+            "go".to_string(),
+            "--worktree".to_string(),
+            "demo".to_string(),
+        ];
+
+        let (port, server) = one_shot_server("409 Conflict", refusal);
+        std::env::set_var("HOUSTON_MCP_URL", format!("http://127.0.0.1:{port}"));
+        let err = pane_cli_inner(&args).expect_err("a 409 is a refusal");
+        server.join().expect("the server thread");
+        assert!(
+            format!("{err:#}").contains("is not a git repository, and a worktree needs one"),
+            "the refusal text is what stderr prints: {err:#}"
+        );
+
+        let (port, server) = one_shot_server("409 Conflict", refusal);
+        std::env::set_var("HOUSTON_MCP_URL", format!("http://127.0.0.1:{port}"));
+        assert_eq!(run_pane_cli(&args), 1);
+        server.join().expect("the server thread");
     }
 
     #[test]

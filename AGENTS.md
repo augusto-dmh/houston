@@ -90,8 +90,10 @@ The [development runbook](docs/operations/development.md) contains exact command
   Never run concurrent Cargo workloads. Run `perf_smoke` at normal priority on an idle
   machine; results obtained under load do not establish a performance regression.
 - Agent worktrees under `.houston/worktrees/` build the dev profile only, never
-  `--release`. Remove a worktree once its branch is integrated; `scripts/sweep-targets.sh`
-  bounds what remains (see the runbook's disk usage section).
+  `--release`. Create one with `pane_spawn`'s `worktree` argument (`hs-pane spawn
+  --worktree SLUG`), not `git worktree add`, so Houston records it. Remove a worktree once
+  its branch is integrated; `scripts/sweep-targets.sh` bounds what remains (see the
+  runbook's disk usage section).
 - For each change, run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, relevant
   test binaries and safety scripts in the affected crate. For renderer changes, run
   `bun run typecheck` and affected tests.

@@ -274,6 +274,7 @@ async fn spawn_rolls_back_when_delegation_persistence_fails() {
                 None,
                 false,
                 None,
+                None,
             )
             .expect_err("a missing delegation table must refuse the spawn")
     });
@@ -377,6 +378,7 @@ async fn spawn_registration_waits_for_temporary_cleanup_serialization() {
                 Some("nested-child".into()),
                 None,
                 false,
+                None,
                 None,
             );
             finished_by_spawn.store(true, std::sync::atomic::Ordering::Release);

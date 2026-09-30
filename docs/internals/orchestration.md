@@ -8,9 +8,13 @@ minted for its pane alone. Every signal one pane owes another is one row in `pan
 single table the three delivery doors read — see "The inbox" below.
 
 Every child runs directly in its own project directory, with its CLI's own bypass/auto flag —
-there is no per-session worktree, merge gate or sandbox isolating it (`spawn_session` opens
-the PTY in the session's `project_dir` itself, the same path an operator-opened pane gets).
-Houston does not commit changes on an agent's behalf.
+there is no merge gate or sandbox isolating it (`spawn_session` opens the PTY in the
+session's `project_dir` itself, the same path an operator-opened pane gets). The one
+exception is asked for, never implied: `pane_spawn { worktree: "<slug>" }` (`hs-pane spawn
+--worktree SLUG`) first creates a git worktree at `<workspace>/.houston/worktrees/<slug>` on
+branch `houston/<slug>` (or `branch`), records it in `managed_worktrees`, and starts the
+child there. `worktree` with `cwd` is refused; a child that fails to start takes its new
+worktree and branch with it. Houston does not commit changes on an agent's behalf.
 
 ## The MCP endpoint
 
