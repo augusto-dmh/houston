@@ -361,7 +361,7 @@ only on rare control-plane events — the PTY path never touches SQLite.
 | agent accounts | `agent_profiles` |
 | terminal history | `command_history` |
 | remote | `ssh_profiles` |
-| bookkeeping | `settings`, `mcp_managed`, `workspace_hooks`, `skill_pushes` |
+| bookkeeping | `settings`, `mcp_managed`, `workspace_hooks`, `skill_pushes`, `managed_worktrees` (the worktrees Houston created and may remove) |
 | legacy tasks | `tasks`, `task_events` — retained for database compatibility |
 | legacy substrate | `swarms`, `swarm_agents`, `swarm_messages`, `swarm_deliveries`, `swarm_plan_events_applied` |
 
@@ -380,8 +380,14 @@ In memory only, by design: live `sessions` and restored `dead` husks; `swarm_act
 
 ## Background loops
 
-`boot::spawn_background_loops` is called only by the daemon host and spawns three tasks:
-`swarm_mail_loop`, `delegation_watch_loop`, `routine_fire_loop`.
+`boot::spawn_background_loops` is called only by the daemon host and spawns five tasks:
+`swarm_mail_loop`, `delegation_watch_loop`, `routine_fire_loop`, `update_check_loop` and
+`worktree_cleanup_loop`. The last runs one pass at boot and every 6 h over each workspace
+with rows in `managed_worktrees`: it works out why each recorded worktree stays
+(`WorktreeKeep`), measures it, removes the ones nothing keeps while
+`worktree_cleanup_enabled` is on, and broadcasts `worktree_cleanup` per workspace. Clean now
+(`worktree_cleanup_run`) is the same pass with removal forced on; a workspace mid-pass
+refuses a second one.
 `swarm_mail_loop` carries two jobs per round — `hook_drop_tick` first, then
 a `plan/events/` GC sweep gated to `SWARM_MAIL_GC_SWEEP_INTERVAL_MS`. Mail delivery uses
 `pane_inbox` `Mail` rows and the shared inbox delivery paths. The loop lists the legacy
@@ -433,7 +439,9 @@ pane is observed through its `RoutineRun` row and can be opened from the routine
 The `settings` table is a plain string KV store. Live keys: `session_idle_reap_enabled` and
 `session_idle_reap_minutes` (≤ 40 000), `keymap_overrides`, `skill_sync_auto_push`,
 `command_history_ignore_globs`, `voice_settings`, `restore_budget`, `restore_resume`,
-`mailbox_retention_hours`, `orchestration_max_live_children` and
+`mailbox_retention_hours`, `worktree_cleanup_enabled` (`0`/`1`, off by default) and
+`worktree_cleanup_grace_hours` (1..=`proto::WORKTREE_CLEANUP_GRACE_HOURS_MAX`, default 24),
+`orchestration_max_live_children` and
 `orchestration_max_spawn_depth` (both ≤ `proto::ORCHESTRATION_CAP_MAX`).
 
 `EnvFilter::try_from_default_env()` reads `RUST_LOG`, defaulting to `houston_core=info`. Two

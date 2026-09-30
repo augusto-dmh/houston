@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump once per wire-touching batch (`/ws` only); several PRs may land
 /// under one coordinated bump instead of each incrementing it.
-pub const PROTOCOL_VERSION: u32 = 119;
+pub const PROTOCOL_VERSION: u32 = 120;
 
 pub const VOICE_LEVEL_INTERVAL_MS: u64 = 50;
 
@@ -1392,6 +1392,68 @@ pub struct GitWorktreeInfo {
     pub dirty: bool,
 }
 
+/// Why a managed worktree is still on disk. `None` in its place means a pass found
+/// nothing keeping it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-gen", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorktreeKeep {
+    Dirty {
+        files: u32,
+    },
+    CommitsOutsidePr {
+        count: u32,
+        pr: u32,
+    },
+    PrHeadUnavailable {
+        pr: u32,
+    },
+    InUse {
+        session: u32,
+    },
+    Grace {
+        #[cfg_attr(feature = "ts-gen", ts(type = "number"))]
+        until_ms: i64,
+    },
+    NotMerged {
+        state: String,
+    },
+    NoPr,
+    GhUnavailable {
+        gh: GhState,
+    },
+    ProbablyIntegrated,
+    RemoveFailed {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-gen", derive(ts_rs::TS), ts(export))]
+pub struct ManagedWorktreeInfo {
+    pub path: String,
+    pub branch: String,
+    pub pr: Option<u32>,
+    pub keep: Option<WorktreeKeep>,
+    #[cfg_attr(feature = "ts-gen", ts(type = "number | null"))]
+    pub bytes: Option<u64>,
+    #[cfg_attr(feature = "ts-gen", ts(type = "number | null"))]
+    pub measured_at_ms: Option<i64>,
+    /// `None` until a pass has evaluated it; `keep: None` means nothing only then.
+    #[cfg_attr(feature = "ts-gen", ts(type = "number | null"))]
+    pub checked_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts-gen", derive(ts_rs::TS), ts(export))]
+pub struct RemovedWorktree {
+    pub path: String,
+    pub branch: String,
+    pub pr: Option<u32>,
+    #[cfg_attr(feature = "ts-gen", ts(type = "number | null"))]
+    pub bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-gen", derive(ts_rs::TS), ts(export))]
 pub struct GitCheckpointInfo {
@@ -2464,6 +2526,19 @@ pub enum ClientMsg {
     GitWorktreePrune {
         dir: String,
     },
+    /// Both halves of the setting at once, as `HostInfo` reports them.
+    WorktreeCleanupSet {
+        enabled: bool,
+        grace_hours: u32,
+    },
+    /// The last pass's view of `dir`'s managed worktrees; nothing is measured or asked.
+    WorktreeCleanupStatus {
+        dir: String,
+    },
+    /// Clean now: one pass over `dir` that removes what can go, whatever the setting.
+    WorktreeCleanupRun {
+        dir: String,
+    },
     GitCheckpointCreate {
         dir: String,
         label: String,
@@ -3095,6 +3170,14 @@ pub enum ServerMsg {
         #[cfg_attr(feature = "ts-gen", ts(optional = nullable))]
         message: Option<String>,
     },
+    /// A status reply, and the broadcast after every pass over `dir`.
+    WorktreeCleanup {
+        dir: String,
+        entries: Vec<ManagedWorktreeInfo>,
+        /// Only a pass fills this: what it removed just now.
+        #[serde(default)]
+        removed: Vec<RemovedWorktree>,
+    },
     GitCheckpoints {
         dir: String,
         checkpoints: Vec<GitCheckpointInfo>,
@@ -3326,6 +3409,8 @@ pub enum ServerMsg {
         #[cfg_attr(feature = "ts-gen", ts(type = "number"))]
         mailbox_files_on_disk: u64,
         mailbox_retention_hours: u32,
+        worktree_cleanup_enabled: bool,
+        worktree_cleanup_grace_hours: u32,
         command_history_ignore_glob_count: u32,
         #[cfg_attr(feature = "ts-gen", ts(type = "number"))]
         session_db_bytes: u64,
@@ -3522,6 +3607,10 @@ pub const RESTORE_BUDGET_MAX: u32 = 500;
 pub const MAILBOX_RETENTION_HOURS_DEFAULT: u32 = 24;
 
 pub const MAILBOX_RETENTION_HOURS_MAX: u32 = 720;
+
+pub const WORKTREE_CLEANUP_GRACE_HOURS_DEFAULT: u32 = 24;
+
+pub const WORKTREE_CLEANUP_GRACE_HOURS_MAX: u32 = 720;
 
 pub const ORCHESTRATION_CAP_MAX: u32 = 16;
 

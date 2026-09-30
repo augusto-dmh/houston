@@ -61,6 +61,58 @@ pub fn pr_status(dir: &Path) -> PrStatus {
     }
 }
 
+/// What the cleanup pass needs to know about the PR of a checkout's branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrFacts {
+    pub number: u32,
+    pub state: String,
+    pub merged_at: Option<String>,
+    pub head_oid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrLookup {
+    Found(PrFacts),
+    NoPr,
+    Failed(String),
+}
+
+/// One `gh pr view` for the branch checked out in `dir`; the caller checks `state` first.
+pub fn pr_for_checkout(dir: &Path) -> PrLookup {
+    let out = match run(
+        dir,
+        &["pr", "view", "--json", "number,state,mergedAt,headRefOid"],
+    ) {
+        Ok(o) => o,
+        Err(e) => return PrLookup::Failed(format!("{e:#}")),
+    };
+    if !out.ok {
+        if out.stderr.contains("no pull requests found") {
+            return PrLookup::NoPr;
+        }
+        return PrLookup::Failed(first_meaningful_line(&out.stderr).unwrap_or_default());
+    }
+    let v: serde_json::Value = match serde_json::from_str(&out.stdout) {
+        Ok(v) => v,
+        Err(e) => return PrLookup::Failed(format!("gh pr view printed no JSON: {e}")),
+    };
+    let number = v["number"].as_u64().and_then(|n| u32::try_from(n).ok());
+    let state = v["state"].as_str();
+    let head = v["headRefOid"].as_str();
+    match (number, state, head) {
+        (Some(number), Some(state), Some(head)) => PrLookup::Found(PrFacts {
+            number,
+            state: state.to_string(),
+            merged_at: v["mergedAt"].as_str().map(str::to_string),
+            head_oid: head.to_string(),
+        }),
+        _ => PrLookup::Failed(format!(
+            "gh pr view left out a field: {}",
+            out.stdout.trim()
+        )),
+    }
+}
+
 pub struct PrCreate {
     pub gh: proto::GhState,
     pub pr: Option<proto::PrInfo>,
