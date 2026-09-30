@@ -550,3 +550,58 @@ async fn a_changes_pane_worktree_is_recorded() {
         rows[0].path
     );
 }
+
+#[tokio::test]
+async fn the_hs_pane_door_creates_the_worktree_and_reports_refusals() {
+    let _guard = SERIAL.lock().await;
+    let r = rig("hs-pane-door", true).await;
+    let parent = r.pane();
+    let token = r.token_for(parent.id);
+
+    // The body `hs-pane spawn --worktree demo --branch feat/door` sends.
+    let (status, body) = http_json(
+        r.addr,
+        "POST",
+        "/orchestrate/spawn",
+        &token,
+        Some(serde_json::json!({
+            "kind": "grok",
+            "prompt": "go",
+            "worktree": "demo",
+            "branch": "feat/door",
+        })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let child = body["session_id"].as_u64().unwrap() as u32;
+    let tree = r.worktrees_dir().join("demo");
+    let out = await_output(&r.daemon, child, "FIXTURE-READY").await;
+    assert!(out.contains(&format!("CWD:{}", tree.display())), "{out:?}");
+    assert_eq!(
+        r.rows(),
+        vec![Row {
+            path: tree.display().to_string(),
+            branch: "feat/door".into(),
+            provenance: "pane_spawn".into(),
+            created_by_session: Some(parent.id),
+        }]
+    );
+
+    let (status, body) = http_json(
+        r.addr,
+        "POST",
+        "/orchestrate/spawn",
+        &token,
+        Some(serde_json::json!({"kind": "grok", "prompt": "go", "worktree": "a/b"})),
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("path separator"),
+        "{body}"
+    );
+    assert_eq!(r.rows().len(), 1);
+}
