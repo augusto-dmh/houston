@@ -867,6 +867,8 @@ pub const PANE_VERBS: &[VerbSpec] = &[
             "profile",
             "role",
             "target_workspace",
+            "worktree",
+            "branch",
             "reusable",
             "handoff",
             "effort",
