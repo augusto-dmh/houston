@@ -605,3 +605,180 @@ async fn the_hs_pane_door_creates_the_worktree_and_reports_refusals() {
     );
     assert_eq!(r.rows().len(), 1);
 }
+
+async fn changes_pane_reply(ws: &mut WsStream, msg: proto::ClientMsg) -> String {
+    ws.send(Message::text(serde_json::to_string(&msg).unwrap()))
+        .await
+        .unwrap();
+    loop {
+        match next_control(ws).await {
+            proto::ServerMsg::GitWorktrees {
+                message: Some(m), ..
+            } => return m,
+            proto::ServerMsg::Error { message, .. } => panic!("daemon error: {message}"),
+            _ => continue,
+        }
+    }
+}
+
+#[tokio::test]
+async fn removing_a_worktree_from_the_changes_pane_frees_its_slug() {
+    let _guard = SERIAL.lock().await;
+    let r = rig("changes-remove", true).await;
+    let parent = r.pane();
+    let token = r.token_for(parent.id);
+    let tree = r.worktrees_dir().join("demo");
+    spawned_session(
+        &r.spawn(
+            &token,
+            serde_json::json!({"kind": "grok", "prompt": "go", "worktree": "demo"}),
+        )
+        .await,
+    );
+
+    let mut ws = connect_and_hello(r.addr, TOKEN).await;
+    let _ = next_control(&mut ws).await;
+    changes_pane_reply(
+        &mut ws,
+        proto::ClientMsg::GitWorktreeRemove {
+            dir: r.ws_dir.display().to_string(),
+            path: tree.display().to_string(),
+            force: false,
+        },
+    )
+    .await;
+    assert!(
+        r.rows().is_empty(),
+        "a removed worktree keeps no row: {:?}",
+        r.rows()
+    );
+
+    git(&r.ws_dir, &["branch", "-D", "houston/demo"]);
+    spawned_session(
+        &r.spawn(
+            &token,
+            serde_json::json!({"kind": "grok", "prompt": "go", "worktree": "demo"}),
+        )
+        .await,
+    );
+    assert!(tree.is_dir());
+    assert_eq!(r.rows().len(), 1, "{:?}", r.rows());
+}
+
+#[tokio::test]
+async fn a_worktree_deleted_by_hand_does_not_block_its_slug() {
+    let _guard = SERIAL.lock().await;
+    let r = rig("hand-deleted", true).await;
+    let parent = r.pane();
+    let token = r.token_for(parent.id);
+    let tree = r.worktrees_dir().join("demo");
+    spawned_session(
+        &r.spawn(
+            &token,
+            serde_json::json!({"kind": "grok", "prompt": "go", "worktree": "demo"}),
+        )
+        .await,
+    );
+
+    std::fs::remove_dir_all(&tree).unwrap();
+    git(&r.ws_dir, &["worktree", "prune"]);
+    let second = r
+        .spawn(
+            &token,
+            serde_json::json!({
+                "kind": "grok",
+                "prompt": "go",
+                "worktree": "demo",
+                "branch": "feat/second",
+            }),
+        )
+        .await;
+    spawned_session(&second);
+    assert!(tree.is_dir(), "the new worktree must survive its spawn");
+    assert_eq!(
+        r.rows(),
+        vec![Row {
+            path: tree.display().to_string(),
+            branch: "feat/second".into(),
+            provenance: "pane_spawn".into(),
+            created_by_session: Some(parent.id),
+        }],
+        "the stale row gives way to the new worktree's"
+    );
+}
+
+#[tokio::test]
+async fn an_invalid_branch_is_refused_before_anything_is_created() {
+    let _guard = SERIAL.lock().await;
+    let r = rig("spawn-bad-branch", true).await;
+    let parent = r.pane();
+    let token = r.token_for(parent.id);
+    let before = r.session_count();
+
+    for branch in ["a..b", "x.lock", "-x"] {
+        let text = refusal_text(
+            &r.spawn(
+                &token,
+                serde_json::json!({
+                    "kind": "grok",
+                    "prompt": "go",
+                    "worktree": "demo",
+                    "branch": branch,
+                }),
+            )
+            .await,
+        );
+        assert!(
+            text.contains(&format!("{branch:?}")) && text.contains("branch name"),
+            "branch {branch:?} must be refused by name: {text}"
+        );
+    }
+    assert_eq!(r.session_count(), before);
+    assert!(r.rows().is_empty());
+    assert!(
+        !r.ws_dir.join(".houston").join("worktrees").exists(),
+        "a refused branch must not leave the worktrees dir behind"
+    );
+}
+
+#[tokio::test]
+async fn a_rollback_that_cannot_remove_the_tree_keeps_its_row() {
+    let _guard = SERIAL.lock().await;
+    let r = rig("spawn-stuck-rollback", true).await;
+    let parent = r.pane();
+    let token = r.token_for(parent.id);
+    let tree = r.worktrees_dir().join("demo");
+
+    // A locked worktree refuses a single `--force`, so the rollback's removal fails.
+    let hook = r.ws_dir.join(".git").join("hooks").join("post-checkout");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\ngit worktree lock --reason held-by-test \"$(pwd)\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let conn = rusqlite::Connection::open(r.db_path()).unwrap();
+    conn.execute_batch("ALTER TABLE delegations RENAME TO delegations_hidden_by_test")
+        .unwrap();
+    drop(conn);
+    let result = r
+        .spawn(
+            &token,
+            serde_json::json!({"kind": "grok", "prompt": "go", "worktree": "demo"}),
+        )
+        .await;
+    let conn = rusqlite::Connection::open(r.db_path()).unwrap();
+    conn.execute_batch("ALTER TABLE delegations_hidden_by_test RENAME TO delegations")
+        .unwrap();
+    drop(conn);
+
+    refusal_text(&result);
+    assert!(tree.is_dir(), "the locked tree is still there");
+    assert!(branch_exists(&r.ws_dir, "houston/demo"));
+    assert_eq!(
+        r.rows().iter().map(|row| &row.path).collect::<Vec<_>>(),
+        vec![&tree.display().to_string()],
+        "a tree the rollback could not remove stays known to Houston"
+    );
+}

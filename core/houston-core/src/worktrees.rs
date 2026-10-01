@@ -157,6 +157,7 @@ pub fn create_on_branch(
     dest: &Path,
 ) -> Result<Worktree> {
     ensure_git_repo(repo)?;
+    crate::git::validate_branch_name(branch)?;
     let branch = branch.to_string();
     let base = match base {
         Some(b) => {

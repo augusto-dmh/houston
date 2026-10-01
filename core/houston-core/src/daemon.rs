@@ -3677,10 +3677,31 @@ impl Daemon {
         };
         // The worktree exists either way; a lost row only means Houston will never
         // remove it on its own, which is the safe side to fail on.
-        if let Err(e) = self.db.managed_worktree_insert(&row) {
+        if let Err(e) = self.db.managed_worktree_record(&row) {
             tracing::warn!("recording worktree {}: {e:#}", path.display());
         }
         Ok(wt)
+    }
+
+    /// Drops the row with the tree, so the path and its slug are free again.
+    pub fn git_worktree_remove(
+        &self,
+        repo: &std::path::Path,
+        worktree: &std::path::Path,
+        force: bool,
+    ) -> anyhow::Result<()> {
+        // Rows hold canonical paths, and a removed tree can no longer be resolved.
+        let key = worktree
+            .canonicalize()
+            .unwrap_or_else(|_| worktree.to_path_buf());
+        crate::worktrees::remove(repo, worktree, force)?;
+        if let Err(e) = self.db.managed_worktree_delete(&key.display().to_string()) {
+            tracing::warn!(
+                "dropping the managed worktree row for {}: {e:#}",
+                key.display()
+            );
+        }
+        Ok(())
     }
 
     fn broadcast_live_children(&self, parent: u32) {
@@ -12574,6 +12595,10 @@ impl Daemon {
             }
             crate::worktrees::validate_slug(&ask.slug)
                 .map_err(|e| anyhow!("spawn refused: {e}"))?;
+            if let Some(branch) = &ask.branch {
+                crate::git::validate_branch_name(branch)
+                    .map_err(|e| anyhow!("spawn refused: {e}"))?;
+            }
         }
         if handoff {
             if let Some(parent) = self.parent_of(caller) {
@@ -12862,7 +12887,7 @@ impl Daemon {
             bytes: None,
             measured_at_ms: None,
         };
-        if let Err(e) = self.db.managed_worktree_insert(&row) {
+        if let Err(e) = self.db.managed_worktree_record(&row) {
             self.discard_spawn_worktree(&created);
             return Err(e).context("spawn refused");
         }
@@ -12871,12 +12896,14 @@ impl Daemon {
 
     /// Undoes `create_spawn_worktree` for a child that never came to be: the tree holds
     /// nothing yet, so it goes with force, and so does the branch made for it.
+    /// A tree that will not go keeps its branch and its row, so Houston still knows it.
     fn discard_spawn_worktree(&self, created: &CreatedWorktree) {
         if let Err(e) = crate::worktrees::remove(&created.repo, &created.path, true) {
             tracing::warn!(
                 "removing worktree {} after a failed spawn: {e:#}",
                 created.path.display()
             );
+            return;
         }
         if let Err(e) = crate::git::delete_branch(&created.repo, &created.branch, true) {
             tracing::warn!(

@@ -2466,10 +2466,12 @@ impl Db {
         Ok(())
     }
 
-    pub fn managed_worktree_insert(&self, row: &ManagedWorktreeRow) -> Result<()> {
+    /// Called only once a worktree was just created at `row.path`, so a row already
+    /// there belongs to a tree that is gone and gives way to the new one.
+    pub fn managed_worktree_record(&self, row: &ManagedWorktreeRow) -> Result<()> {
         let conn = self.conn.lock().expect("db lock");
         conn.execute(
-            "INSERT INTO managed_worktrees
+            "INSERT OR REPLACE INTO managed_worktrees
                 (path, repo_common_dir, branch, provenance, created_by_session, created_at_ms,
                  bytes, measured_at_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -7159,7 +7161,7 @@ mod tests {
     }
 
     #[test]
-    fn a_managed_worktree_path_is_unique() {
+    fn a_new_worktree_at_a_recorded_path_replaces_its_row() {
         let tmp = tempfile::tempdir().unwrap();
         let db = Db::open(&tmp.path().join("t.db")).unwrap();
         let row = ManagedWorktreeRow {
@@ -7172,17 +7174,14 @@ mod tests {
             bytes: None,
             measured_at_ms: None,
         };
-        db.managed_worktree_insert(&row).unwrap();
+        db.managed_worktree_record(&row).unwrap();
         let again = ManagedWorktreeRow {
             provenance: WorktreeProvenance::ChangesPane,
             created_by_session: None,
             created_at_ms: 2,
             ..row.clone()
         };
-        assert!(
-            db.managed_worktree_insert(&again).is_err(),
-            "a second row for the same path must be refused"
-        );
-        assert_eq!(db.managed_worktrees().unwrap(), vec![row]);
+        db.managed_worktree_record(&again).unwrap();
+        assert_eq!(db.managed_worktrees().unwrap(), vec![again]);
     }
 }

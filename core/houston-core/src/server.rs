@@ -2229,8 +2229,9 @@ async fn dispatch(
         proto::ClientMsg::GitWorktreeRemove { dir, path, force } => {
             let d = PathBuf::from(&dir);
             let wt = PathBuf::from(&path);
+            let daemon = Arc::clone(daemon);
             let result =
-                tokio::task::spawn_blocking(move || crate::worktrees::remove(&d, &wt, force))
+                tokio::task::spawn_blocking(move || daemon.git_worktree_remove(&d, &wt, force))
                     .await
                     .unwrap_or_else(|e| {
                         Err(anyhow::anyhow!("git worktree remove task panicked: {e}"))
