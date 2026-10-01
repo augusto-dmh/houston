@@ -278,6 +278,15 @@ impl ToolProvider for OrchestrationTools {
                         output_format: opt_str(args, "output_format"),
                         boundaries: opt_str(args, "boundaries"),
                     };
+                    // Not `opt_str`: an empty slug must reach the slug rule and be refused,
+                    // not read as "no worktree" and spawn in the workspace instead.
+                    let worktree = crate::worktrees::spawn_ask(
+                        args.get("worktree")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        opt_str(args, "branch"),
+                    )
+                    .map_err(|e| ToolError(format!("{e:#}")))?;
                     let info = tokio::task::spawn_blocking(move || {
                         if handoff {
                             daemon.orchestrate_handoff(
@@ -291,6 +300,7 @@ impl ToolProvider for OrchestrationTools {
                                 role,
                                 target_workspace,
                                 effort,
+                                worktree,
                             )
                         } else {
                             daemon.orchestrate_spawn_with_options(
@@ -305,6 +315,7 @@ impl ToolProvider for OrchestrationTools {
                                 target_workspace,
                                 reusable,
                                 effort,
+                                worktree,
                             )
                         }
                     })
@@ -572,6 +583,21 @@ impl OrchestrationTools {
                             "type": "string",
                             "description":
                                 "Working directory; must remain inside the selected target workspace.",
+                        },
+                        "worktree": {
+                            "type": "string",
+                            "description":
+                                "Start the child in a new git worktree of the target workspace, \
+                                 created at .houston/worktrees/<worktree> on branch \
+                                 houston/<worktree> (or `branch`). One directory name: no \
+                                 `/`, `..` or spaces. Refused together with cwd. Houston \
+                                 records it and can remove it once its PR has merged.",
+                        },
+                        "branch": {
+                            "type": "string",
+                            "description":
+                                "The new branch for `worktree`, instead of houston/<worktree>. \
+                                 Must not exist yet; refused without `worktree`.",
                         },
                         "target_workspace": {
                             "type": "string",
@@ -923,6 +949,35 @@ mod tests {
                 !spec.annotations.open_world,
                 "{} acts on daemon-owned panes, not the open web",
                 spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn pane_spawn_schema_offers_worktree_and_branch() {
+        let provider = OrchestrationTools {
+            daemon: Weak::new(),
+        };
+        let specs = provider.all_tools();
+        let spawn = specs
+            .iter()
+            .find(|s| s.name == "pane_spawn")
+            .expect("pane_spawn is listed");
+        for key in ["worktree", "branch"] {
+            assert_eq!(
+                spawn.input_schema["properties"][key]["type"],
+                json!("string"),
+                "pane_spawn must offer `{key}` as a string"
+            );
+        }
+        let required = spawn.input_schema["required"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for key in ["worktree", "branch"] {
+            assert!(
+                !required.contains(&json!(key)),
+                "`{key}` must stay optional so existing callers keep working"
             );
         }
     }

@@ -2202,8 +2202,9 @@ async fn dispatch(
         proto::ClientMsg::GitWorktreeRemove { dir, path, force } => {
             let d = PathBuf::from(&dir);
             let wt = PathBuf::from(&path);
+            let daemon = Arc::clone(daemon);
             let result =
-                tokio::task::spawn_blocking(move || crate::worktrees::remove(&d, &wt, force))
+                tokio::task::spawn_blocking(move || daemon.git_worktree_remove(&d, &wt, force))
                     .await
                     .unwrap_or_else(|e| {
                         Err(anyhow::anyhow!("git worktree remove task panicked: {e}"))
@@ -3627,6 +3628,10 @@ struct SpawnBody {
     output_format: Option<String>,
     #[serde(default)]
     boundaries: Option<String>,
+    #[serde(default)]
+    worktree: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
 }
 
 async fn orch_spawn(
@@ -3651,6 +3656,7 @@ async fn orch_spawn(
             output_format: body.output_format,
             boundaries: body.boundaries,
         };
+        let worktree = crate::worktrees::spawn_ask(body.worktree, body.branch)?;
         if handoff {
             daemon.orchestrate_handoff(
                 scope.session_id,
@@ -3663,6 +3669,7 @@ async fn orch_spawn(
                 body.role,
                 body.target_workspace,
                 body.effort,
+                worktree,
             )
         } else {
             daemon.orchestrate_spawn_with_options(
@@ -3677,6 +3684,7 @@ async fn orch_spawn(
                 body.target_workspace,
                 body.reusable,
                 body.effort,
+                worktree,
             )
         }
     })

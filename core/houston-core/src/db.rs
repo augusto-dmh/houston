@@ -22,6 +22,42 @@ pub struct SkillPushRow {
     pub pushed_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeProvenance {
+    PaneSpawn,
+    ChangesPane,
+}
+
+impl WorktreeProvenance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PaneSpawn => "pane_spawn",
+            Self::ChangesPane => "changes_pane",
+        }
+    }
+
+    // The column's CHECK admits only the two spellings `as_str` writes.
+    fn parse(s: &str) -> Self {
+        if s == "pane_spawn" {
+            Self::PaneSpawn
+        } else {
+            Self::ChangesPane
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedWorktreeRow {
+    pub path: String,
+    pub repo_common_dir: String,
+    pub branch: String,
+    pub provenance: WorktreeProvenance,
+    pub created_by_session: Option<u32>,
+    pub created_at_ms: i64,
+    pub bytes: Option<i64>,
+    pub measured_at_ms: Option<i64>,
+}
+
 pub struct Db {
     conn: Mutex<Connection>,
 }
@@ -1370,6 +1406,20 @@ impl Db {
                 installed_at INTEGER NOT NULL
             );",
         )?;
+        // A row is Houston's permission to remove that worktree once its PR merges; a
+        // worktree without one is never touched, however merged it looks.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS managed_worktrees (
+                path TEXT PRIMARY KEY,
+                repo_common_dir TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                provenance TEXT NOT NULL CHECK (provenance IN ('pane_spawn', 'changes_pane')),
+                created_by_session INTEGER,
+                created_at_ms INTEGER NOT NULL,
+                bytes INTEGER,
+                measured_at_ms INTEGER
+            );",
+        )?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS skill_pushes (
                 tool TEXT NOT NULL,
@@ -2413,6 +2463,68 @@ impl Db {
         if n == 0 {
             anyhow::bail!("no workspace row with path {path:?} to rename");
         }
+        Ok(())
+    }
+
+    /// Called only once a worktree was just created at `row.path`, so a row already
+    /// there belongs to a tree that is gone and gives way to the new one.
+    pub fn managed_worktree_record(&self, row: &ManagedWorktreeRow) -> Result<()> {
+        let conn = self.conn.lock().expect("db lock");
+        conn.execute(
+            "INSERT OR REPLACE INTO managed_worktrees
+                (path, repo_common_dir, branch, provenance, created_by_session, created_at_ms,
+                 bytes, measured_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                row.path,
+                row.repo_common_dir,
+                row.branch,
+                row.provenance.as_str(),
+                row.created_by_session,
+                row.created_at_ms,
+                row.bytes,
+                row.measured_at_ms,
+            ],
+        )
+        .with_context(|| format!("recording managed worktree {}", row.path))?;
+        Ok(())
+    }
+
+    pub fn managed_worktree_delete(&self, path: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("db lock");
+        conn.execute("DELETE FROM managed_worktrees WHERE path = ?1", [path])?;
+        Ok(())
+    }
+
+    pub fn managed_worktrees(&self) -> Result<Vec<ManagedWorktreeRow>> {
+        let conn = self.conn.lock().expect("db lock");
+        let mut stmt = conn.prepare(
+            "SELECT path, repo_common_dir, branch, provenance, created_by_session, created_at_ms,
+                    bytes, measured_at_ms
+             FROM managed_worktrees ORDER BY created_at_ms, path",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let provenance: String = r.get(3)?;
+            Ok(ManagedWorktreeRow {
+                path: r.get(0)?,
+                repo_common_dir: r.get(1)?,
+                branch: r.get(2)?,
+                provenance: WorktreeProvenance::parse(&provenance),
+                created_by_session: r.get(4)?,
+                created_at_ms: r.get(5)?,
+                bytes: r.get(6)?,
+                measured_at_ms: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn managed_worktree_set_size(&self, path: &str, bytes: i64, at_ms: i64) -> Result<()> {
+        let conn = self.conn.lock().expect("db lock");
+        conn.execute(
+            "UPDATE managed_worktrees SET bytes = ?2, measured_at_ms = ?3 WHERE path = ?1",
+            rusqlite::params![path, bytes, at_ms],
+        )?;
         Ok(())
     }
 
@@ -7046,5 +7158,30 @@ mod tests {
                 .any(|r| r.delivered_at.is_none() && r.confirmed_at.is_none()),
             "the never-delivered row stays: {rows:?}"
         );
+    }
+
+    #[test]
+    fn a_new_worktree_at_a_recorded_path_replaces_its_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::open(&tmp.path().join("t.db")).unwrap();
+        let row = ManagedWorktreeRow {
+            path: "/ws/.houston/worktrees/demo".into(),
+            repo_common_dir: "/ws/.git".into(),
+            branch: "houston/demo".into(),
+            provenance: WorktreeProvenance::PaneSpawn,
+            created_by_session: Some(3),
+            created_at_ms: 1,
+            bytes: None,
+            measured_at_ms: None,
+        };
+        db.managed_worktree_record(&row).unwrap();
+        let again = ManagedWorktreeRow {
+            provenance: WorktreeProvenance::ChangesPane,
+            created_by_session: None,
+            created_at_ms: 2,
+            ..row.clone()
+        };
+        db.managed_worktree_record(&again).unwrap();
+        assert_eq!(db.managed_worktrees().unwrap(), vec![again]);
     }
 }

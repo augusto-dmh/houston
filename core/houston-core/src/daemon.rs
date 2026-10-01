@@ -3658,7 +3658,47 @@ impl Daemon {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "repo".to_string());
         let dest = crate::worktrees::default_path(&self.state_dir, &project, name);
-        crate::worktrees::create_named(repo, name, base, &dest)
+        let wt = crate::worktrees::create_named(repo, name, base, &dest)?;
+        let path = wt.path.canonicalize().unwrap_or_else(|_| wt.path.clone());
+        let row = crate::db::ManagedWorktreeRow {
+            path: path.display().to_string(),
+            repo_common_dir: crate::git::checkout_facts(&path)
+                .common_dir
+                .unwrap_or_default(),
+            branch: wt.branch.clone().unwrap_or_default(),
+            provenance: crate::db::WorktreeProvenance::ChangesPane,
+            created_by_session: None,
+            created_at_ms: now_ms() as i64,
+            bytes: None,
+            measured_at_ms: None,
+        };
+        // The worktree exists either way; a lost row only means Houston will never
+        // remove it on its own, which is the safe side to fail on.
+        if let Err(e) = self.db.managed_worktree_record(&row) {
+            tracing::warn!("recording worktree {}: {e:#}", path.display());
+        }
+        Ok(wt)
+    }
+
+    /// Drops the row with the tree, so the path and its slug are free again.
+    pub fn git_worktree_remove(
+        &self,
+        repo: &std::path::Path,
+        worktree: &std::path::Path,
+        force: bool,
+    ) -> anyhow::Result<()> {
+        // Rows hold canonical paths, and a removed tree can no longer be resolved.
+        let key = worktree
+            .canonicalize()
+            .unwrap_or_else(|_| worktree.to_path_buf());
+        crate::worktrees::remove(repo, worktree, force)?;
+        if let Err(e) = self.db.managed_worktree_delete(&key.display().to_string()) {
+            tracing::warn!(
+                "dropping the managed worktree row for {}: {e:#}",
+                key.display()
+            );
+        }
+        Ok(())
     }
 
     fn broadcast_live_children(&self, parent: u32) {
@@ -12452,6 +12492,7 @@ impl Daemon {
             None,
             false,
             None,
+            None,
         )
     }
 
@@ -12469,6 +12510,7 @@ impl Daemon {
         target_workspace: Option<String>,
         reusable: bool,
         effort: Option<proto::ChatEffort>,
+        worktree: Option<crate::worktrees::SpawnWorktree>,
     ) -> Result<proto::SessionInfo> {
         self.spawn_agent_pane(
             caller,
@@ -12483,6 +12525,7 @@ impl Daemon {
             reusable,
             effort,
             false,
+            worktree,
         )
     }
 
@@ -12502,6 +12545,7 @@ impl Daemon {
         role: Option<String>,
         target_workspace: Option<String>,
         effort: Option<proto::ChatEffort>,
+        worktree: Option<crate::worktrees::SpawnWorktree>,
     ) -> Result<proto::SessionInfo> {
         self.spawn_agent_pane(
             caller,
@@ -12516,6 +12560,7 @@ impl Daemon {
             false,
             effort,
             true,
+            worktree,
         )
     }
 
@@ -12534,7 +12579,22 @@ impl Daemon {
         reusable: bool,
         effort: Option<proto::ChatEffort>,
         handoff: bool,
+        worktree: Option<crate::worktrees::SpawnWorktree>,
     ) -> Result<proto::SessionInfo> {
+        if let Some(ask) = &worktree {
+            if cwd.is_some() {
+                bail!(
+                    "spawn refused: `worktree` and `cwd` cannot be combined - the child starts \
+                     in the worktree Houston creates; drop `cwd`"
+                );
+            }
+            crate::worktrees::validate_slug(&ask.slug)
+                .map_err(|e| anyhow!("spawn refused: {e}"))?;
+            if let Some(branch) = &ask.branch {
+                crate::git::validate_branch_name(branch)
+                    .map_err(|e| anyhow!("spawn refused: {e}"))?;
+            }
+        }
         if handoff {
             if let Some(parent) = self.parent_of(caller) {
                 bail!(
@@ -12683,6 +12743,11 @@ impl Daemon {
                 .resolve_named_profile(kind, label)
                 .context("spawn refused")?,
         };
+        let created = match &worktree {
+            Some(ask) => Some(self.create_spawn_worktree(&project_dir, ask, caller)?),
+            None => None,
+        };
+        let cwd = created.as_ref().map(|c| c.path.clone()).unwrap_or(cwd);
         let sid = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (title, title_source, codename) = match &role {
             Some(role) => {
@@ -12720,13 +12785,24 @@ impl Daemon {
             resume_handle: None,
             resume_notice: None,
         });
-        let info = spawned?;
+        let info = match spawned {
+            Ok(info) => info,
+            Err(e) => {
+                if let Some(c) = &created {
+                    self.discard_spawn_worktree(c);
+                }
+                return Err(e);
+            }
+        };
         self.record_approval_mode(sid, requested_mode);
         if handoff {
             return Ok(info);
         }
         if let Err(parent_error) = self.get(caller) {
             let rollback = self.rollback_spawned_child(sid);
+            if let Some(c) = &created {
+                self.discard_spawn_worktree(c);
+            }
             return match rollback {
                 Ok(()) => Err(parent_error).context(format!(
                     "parent pane {caller} disappeared before the delegation for child {sid} \
@@ -12748,6 +12824,9 @@ impl Daemon {
             now_ms(),
         ) {
             let rollback = self.rollback_spawned_child(sid);
+            if let Some(c) = &created {
+                self.discard_spawn_worktree(c);
+            }
             return match rollback {
                 Ok(()) => Err(persist_error).context(format!(
                     "opening the delegation record for child {sid} of {caller} failed; the child was rolled back"
@@ -12761,6 +12840,81 @@ impl Daemon {
         self.broadcast_delegation(sid);
         self.broadcast_live_children(caller);
         Ok(info)
+    }
+
+    fn create_spawn_worktree(
+        &self,
+        project_dir: &Path,
+        ask: &crate::worktrees::SpawnWorktree,
+        caller: u32,
+    ) -> Result<CreatedWorktree> {
+        if !crate::git::is_git_repo(project_dir) {
+            bail!(
+                "spawn refused: workspace {} is not a git repository, and a worktree needs one",
+                project_dir.display()
+            );
+        }
+        let dest = crate::worktrees::spawn_path(project_dir, &ask.slug);
+        let branch = ask
+            .branch
+            .clone()
+            .unwrap_or_else(|| format!("houston/{}", crate::git::ref_slug(&ask.slug)));
+        if let Some(dir) = dest.parent() {
+            crate::worktrees::ensure_ignored(dir).context("spawn refused")?;
+        }
+        crate::worktrees::create_on_branch(project_dir, &branch, None, &dest)
+            .context("spawn refused")?;
+        let path = dest.canonicalize().unwrap_or(dest);
+        let created = CreatedWorktree {
+            repo: project_dir.to_path_buf(),
+            path,
+            branch,
+        };
+        let row = crate::db::ManagedWorktreeRow {
+            path: created.path.display().to_string(),
+            repo_common_dir: crate::git::checkout_facts(&created.path)
+                .common_dir
+                .unwrap_or_default(),
+            branch: created.branch.clone(),
+            provenance: crate::db::WorktreeProvenance::PaneSpawn,
+            created_by_session: Some(caller),
+            created_at_ms: now_ms() as i64,
+            bytes: None,
+            measured_at_ms: None,
+        };
+        if let Err(e) = self.db.managed_worktree_record(&row) {
+            self.discard_spawn_worktree(&created);
+            return Err(e).context("spawn refused");
+        }
+        Ok(created)
+    }
+
+    /// Undoes `create_spawn_worktree` for a child that never came to be: the tree holds
+    /// nothing yet, so it goes with force, and so does the branch made for it.
+    /// A tree that will not go keeps its branch and its row, so Houston still knows it.
+    fn discard_spawn_worktree(&self, created: &CreatedWorktree) {
+        if let Err(e) = crate::worktrees::remove(&created.repo, &created.path, true) {
+            tracing::warn!(
+                "removing worktree {} after a failed spawn: {e:#}",
+                created.path.display()
+            );
+            return;
+        }
+        if let Err(e) = crate::git::delete_branch(&created.repo, &created.branch, true) {
+            tracing::warn!(
+                "deleting branch {:?} after a failed spawn: {e:#}",
+                created.branch
+            );
+        }
+        if let Err(e) = self
+            .db
+            .managed_worktree_delete(&created.path.display().to_string())
+        {
+            tracing::warn!(
+                "dropping the managed worktree row for {}: {e:#}",
+                created.path.display()
+            );
+        }
     }
 
     fn rollback_spawned_child(&self, child: u32) -> Result<()> {
@@ -15353,6 +15507,12 @@ fn init_prompts_dir(project_dir: &Path) -> Result<PathBuf> {
             .with_context(|| format!("writing {}", gitignore.display()))?;
     }
     Ok(dir)
+}
+
+struct CreatedWorktree {
+    repo: PathBuf,
+    path: PathBuf,
+    branch: String,
 }
 
 fn init_orchestration_scope(project_dir: &Path) -> Result<(PathBuf, PathBuf)> {

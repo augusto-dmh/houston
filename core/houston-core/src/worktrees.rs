@@ -74,13 +74,91 @@ pub fn list(repo: &Path) -> Result<Vec<Worktree>> {
     Ok(parse_list(&raw))
 }
 
+/// What a `pane_spawn` caller asks for: a slug for the directory and, optionally, the
+/// branch to create in place of `houston/<slug>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnWorktree {
+    pub slug: String,
+    pub branch: Option<String>,
+}
+
+/// The two spawn arguments as one ask; a branch with nowhere to check it out is refused.
+pub fn spawn_ask(
+    worktree: Option<String>,
+    branch: Option<String>,
+) -> Result<Option<SpawnWorktree>> {
+    match (worktree, branch) {
+        (Some(slug), branch) => Ok(Some(SpawnWorktree { slug, branch })),
+        (None, Some(b)) => bail!(
+            "spawn refused: `branch` {b:?} names the branch of a new worktree, so it needs \
+             `worktree` too"
+        ),
+        (None, None) => Ok(None),
+    }
+}
+
 /// A panel worktree: branch `houston/<slug>` off `base`, at `dest`. The task
 /// flavour above stays for orchestrator runs; this one is named and untracked
 /// by any task, so a collision is refused by name.
 pub fn create_named(repo: &Path, slug: &str, base: Option<&str>, dest: &Path) -> Result<Worktree> {
-    ensure_git_repo(repo)?;
     let slug = crate::git::ref_slug(slug);
-    let branch = format!("houston/{slug}");
+    create_on_branch(repo, &format!("houston/{slug}"), base, dest)
+}
+
+/// Where `pane_spawn` puts the worktree it was asked for: inside the workspace, so the
+/// child's cwd passes the same "inside the target workspace" rule any cwd does.
+pub fn spawn_path(workspace: &Path, slug: &str) -> PathBuf {
+    workspace
+        .join(crate::paths::PROJECT_DIR)
+        .join("worktrees")
+        .join(slug)
+}
+
+/// A slug becomes one directory name under `.houston/worktrees/`, so anything that could
+/// climb out of it or split it is refused rather than rewritten.
+pub fn validate_slug(slug: &str) -> Result<()> {
+    let rule = if slug.is_empty() {
+        Some("it is empty")
+    } else if slug.contains('/') || slug.contains('\\') {
+        Some("it contains a path separator")
+    } else if slug.contains("..") {
+        Some("it contains `..`")
+    } else if slug.chars().any(char::is_whitespace) {
+        Some("it contains whitespace")
+    } else {
+        None
+    };
+    match rule {
+        Some(rule) => bail!(
+            "worktree slug {slug:?} is refused: {rule}; a slug is one directory name, \
+             e.g. \"fix-login\""
+        ),
+        None => Ok(()),
+    }
+}
+
+/// Worktrees nested in the workspace would show in its `git status`; one `*` keeps the
+/// whole directory out, as `.houston/swarm/` does. A file already there is left alone.
+pub fn ensure_ignored(worktrees_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(worktrees_dir)
+        .with_context(|| format!("creating {}", worktrees_dir.display()))?;
+    let gitignore = worktrees_dir.join(".gitignore");
+    if !gitignore.exists() {
+        std::fs::write(&gitignore, "*\n")
+            .with_context(|| format!("writing {}", gitignore.display()))?;
+    }
+    Ok(())
+}
+
+pub fn create_on_branch(
+    repo: &Path,
+    branch: &str,
+    base: Option<&str>,
+    dest: &Path,
+) -> Result<Worktree> {
+    ensure_git_repo(repo)?;
+    crate::git::validate_branch_name(branch)?;
+    let branch = branch.to_string();
     let base = match base {
         Some(b) => {
             if !ref_exists(repo, b) {
