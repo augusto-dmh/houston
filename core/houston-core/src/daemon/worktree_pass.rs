@@ -287,8 +287,9 @@ impl Daemon {
     }
 }
 
-/// The first thing keeping `path`, in the order a reader would ask: can Houston see
-/// the PR, is it merged, would removing lose work, is someone in it, has the grace run.
+/// The first thing keeping `path`, in the order a reader would ask: is it still on the
+/// recorded branch, can Houston see the PR, is it merged, would removing lose work, is
+/// someone in it, has the grace run.
 #[allow(clippy::too_many_arguments)]
 fn keep_reason(
     ws: &CleanupWorkspace,
@@ -299,6 +300,20 @@ fn keep_reason(
     now: i64,
     live: &[(u32, PathBuf)],
 ) -> (Option<u32>, Option<WorktreeKeep>) {
+    // `gh pr view` and the ancestry check below both read the checked-out branch, while
+    // removal deletes the recorded one; they must be the same branch.
+    match wc::current_branch(path) {
+        Some(Some(current)) if current == row.branch => {}
+        Some(current) => return (None, Some(WorktreeKeep::BranchChanged { current })),
+        None => {
+            return (
+                None,
+                Some(WorktreeKeep::RemoveFailed {
+                    message: format!("git branch failed in {}", row.path),
+                }),
+            )
+        }
+    }
     if gh != proto::GhState::Ready {
         let keep = if wc::upstream_gone(&ws.dir, &row.branch) {
             WorktreeKeep::ProbablyIntegrated
@@ -327,6 +342,18 @@ fn keep_reason(
                 pr,
                 Some(WorktreeKeep::RemoveFailed {
                     message: format!("git status failed in {}", row.path),
+                }),
+            )
+        }
+    }
+    match wc::ignored_files(path) {
+        Some(0) => {}
+        Some(files) => return (pr, Some(WorktreeKeep::IgnoredFiles { files })),
+        None => {
+            return (
+                pr,
+                Some(WorktreeKeep::RemoveFailed {
+                    message: format!("git status --ignored failed in {}", row.path),
                 }),
             )
         }

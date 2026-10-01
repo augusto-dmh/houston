@@ -96,7 +96,10 @@ describe('WorktreesDialog cleanup section', () => {
 
   it('every keep reason has its own line', () => {
     const cases: [WorktreeKeep, string][] = [
+      [{ kind: 'branch_changed', current: 'feat/other' }, 'Kept: switched to feat/other'],
+      [{ kind: 'branch_changed', current: null }, 'Kept: its HEAD is detached from the branch Houston created'],
       [{ kind: 'dirty', files: 3 }, 'Kept: 3 uncommitted files'],
+      [{ kind: 'ignored_files', files: 1 }, 'Kept: 1 ignored file removal would delete'],
       [{ kind: 'commits_outside_pr', count: 2, pr: 36 }, 'Kept: 2 commits not in PR #36'],
       [{ kind: 'pr_head_unavailable', pr: 36 }, 'Kept: the head of PR #36 could not be fetched'],
       [{ kind: 'in_use', session: 12 }, 'Kept: in use by pane 12'],
@@ -115,7 +118,7 @@ describe('WorktreesDialog cleanup section', () => {
       (el) => el.textContent
     )
     expect(lines).toEqual(cases.map(([, line]) => line))
-    expect(new Set(lines).size).toBe(10)
+    expect(new Set(lines).size).toBe(cases.length)
   })
 
   it('header counts removable trees', () => {

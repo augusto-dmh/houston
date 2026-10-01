@@ -590,9 +590,10 @@ ManagedWorktreeInfo path, branch, pr?, keep: WorktreeKeep | null, bytes?, measur
                    checked_at_ms? (null until a pass evaluated it; only then does keep: null mean
                    nothing keeps it)
 RemovedWorktree    path, branch, pr?, bytes?
-WorktreeKeep       dirty{files} | commits_outside_pr{count, pr} | pr_head_unavailable{pr} |
-                   in_use{session} | grace{until_ms} | not_merged{state} | no_pr |
-                   gh_unavailable{gh} | probably_integrated | remove_failed{message}
+WorktreeKeep       branch_changed{current?} | dirty{files} | ignored_files{files} |
+                   commits_outside_pr{count, pr} | pr_head_unavailable{pr} | in_use{session} |
+                   grace{until_ms} | not_merged{state} | no_pr | gh_unavailable{gh} |
+                   probably_integrated | remove_failed{message}
 
 UsageProvider      claude | codex
 UsageTokenTotals   uncached_input_tokens, cached_input_tokens, cache_creation_tokens, output_tokens, reasoning_tokens

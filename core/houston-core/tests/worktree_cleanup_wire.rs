@@ -1086,3 +1086,85 @@ async fn a_pass_calls_gh_once_per_tree() {
     );
     assert_eq!(r.row_count(), 3);
 }
+
+#[tokio::test]
+async fn a_tree_switched_to_another_branch_is_kept_with_its_unpushed_work() {
+    let _guard = SERIAL.lock().await;
+    let r = rig().await;
+    let ws = r.workspace("ws");
+    r.set_cleanup(true, 1);
+    let tree = r.tree(&ws, "work", true);
+    std::fs::write(tree.join("unpushed.txt"), "x\n").unwrap();
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "never pushed"]);
+    let unpushed = git(&tree, &["rev-parse", "HEAD"]);
+    // An agent moves the tree to a branch whose own PR has merged.
+    git(&tree, &["switch", "-q", "-c", "houston/other", "main"]);
+    let head = git(&tree, &["rev-parse", "HEAD"]);
+    pr_json("other", "MERGED", Some(now_ms() - 2 * HOUR_MS), &head);
+
+    let (entries, removed) = run(&r, &ws.dir).await;
+    let d = Arc::clone(&r.daemon);
+    tokio::task::spawn_blocking(move || d.worktree_cleanup_tick())
+        .await
+        .unwrap();
+    assert!(removed.is_empty(), "{removed:?}");
+    assert_eq!(
+        keep_of(&entries, &tree),
+        Some(proto::WorktreeKeep::BranchChanged {
+            current: Some("houston/other".into())
+        })
+    );
+    assert!(tree.exists());
+    assert_eq!(git(&ws.dir, &["rev-parse", "houston/work"]), unpushed);
+}
+
+#[tokio::test]
+async fn a_loose_ignored_file_keeps_the_tree_and_an_ignored_build_dir_does_not() {
+    let _guard = SERIAL.lock().await;
+    let r = rig().await;
+    let ws = r.workspace("ws");
+    r.set_cleanup(false, 1);
+    let tree = r.tree(&ws, "env", true);
+    std::fs::write(tree.join(".gitignore"), ".env\ntarget/\n").unwrap();
+    git(&tree, &["add", "-A"]);
+    git(&tree, &["commit", "-q", "-m", "ignore"]);
+    git(&tree, &["push", "-q", "origin", "houston/env"]);
+    merged("env", &tree, 2);
+    std::fs::write(tree.join(".env"), "TOKEN=local\n").unwrap();
+    std::fs::create_dir_all(tree.join("target").join("debug")).unwrap();
+    std::fs::write(tree.join("target").join("debug").join("app"), "bin").unwrap();
+
+    let (entries, removed) = run(&r, &ws.dir).await;
+    assert!(removed.is_empty(), "{removed:?}");
+    assert_eq!(
+        keep_of(&entries, &tree),
+        Some(proto::WorktreeKeep::IgnoredFiles { files: 1 })
+    );
+    assert!(tree.join(".env").exists());
+
+    std::fs::remove_file(tree.join(".env")).unwrap();
+    let (_, removed) = run(&r, &ws.dir).await;
+    assert_eq!(removed.len(), 1, "build output alone does not keep it");
+    assert!(!tree.exists());
+}
+
+#[tokio::test]
+async fn an_untracked_file_keeps_the_tree_even_when_status_hides_untracked_files() {
+    let _guard = SERIAL.lock().await;
+    let r = rig().await;
+    let ws = r.workspace("ws");
+    r.set_cleanup(false, 1);
+    let tree = r.tree(&ws, "hidden", true);
+    merged("hidden", &tree, 2);
+    git(&ws.dir, &["config", "status.showUntrackedFiles", "no"]);
+    std::fs::write(tree.join("notes.txt"), "mine\n").unwrap();
+
+    let (entries, removed) = run(&r, &ws.dir).await;
+    assert!(removed.is_empty(), "{removed:?}");
+    assert_eq!(
+        keep_of(&entries, &tree),
+        Some(proto::WorktreeKeep::Dirty { files: 1 })
+    );
+    assert!(tree.join("notes.txt").exists());
+}

@@ -35,8 +35,14 @@ function plural(n: number, one: string, many: string): string {
 
 export function keepLine(keep: WorktreeKeep, nowMs: number): string {
   switch (keep.kind) {
+    case 'branch_changed':
+      return keep.current === null
+        ? 'Kept: its HEAD is detached from the branch Houston created'
+        : `Kept: switched to ${keep.current}`
     case 'dirty':
       return `Kept: ${plural(keep.files, 'uncommitted file', 'uncommitted files')}`
+    case 'ignored_files':
+      return `Kept: ${plural(keep.files, 'ignored file', 'ignored files')} removal would delete`
     case 'commits_outside_pr':
       return `Kept: ${plural(keep.count, 'commit', 'commits')} not in PR #${keep.pr}`
     case 'pr_head_unavailable':

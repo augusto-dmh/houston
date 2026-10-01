@@ -1398,7 +1398,17 @@ pub struct GitWorktreeInfo {
 #[cfg_attr(feature = "ts-gen", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorktreeKeep {
+    /// The tree is no longer on the branch Houston recorded, so its PR says nothing
+    /// about the recorded branch; `current` is `None` on a detached HEAD.
+    BranchChanged {
+        current: Option<String>,
+    },
     Dirty {
+        files: u32,
+    },
+    /// Ignored files outside a wholly ignored directory, such as `.env`; removal would
+    /// delete them. Wholly ignored directories count as build output and go.
+    IgnoredFiles {
         files: u32,
     },
     CommitsOutsidePr {

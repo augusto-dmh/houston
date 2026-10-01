@@ -15,11 +15,47 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Paths `git status` would report: modified, staged and untracked alike, since
-/// `git worktree remove` refuses any of them without force.
+/// The branch checked out in `tree`; `Some(None)` on a detached HEAD.
+pub fn current_branch(tree: &Path) -> Option<Option<String>> {
+    let out = git(tree, &["branch", "--show-current"])?;
+    let name = out.trim();
+    Some((!name.is_empty()).then(|| name.to_string()))
+}
+
+/// Every modified, staged or untracked file, one per path. The flags are explicit so a
+/// repository's `status.showUntrackedFiles` or submodule settings cannot hide one.
 pub fn dirty_files(tree: &Path) -> Option<u32> {
-    let out = git(tree, &["status", "--porcelain"])?;
+    let out = git(
+        tree,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+    )?;
     Some(out.lines().filter(|l| !l.trim().is_empty()).count() as u32)
+}
+
+/// Loose ignored files (`.env`, local settings) that `git worktree remove` would delete.
+/// A wholly ignored directory is listed once with a trailing `/` and is taken as build
+/// output (`target/`, `node_modules/`), so it is not counted.
+pub fn ignored_files(tree: &Path) -> Option<u32> {
+    let out = git(
+        tree,
+        &[
+            "status",
+            "--porcelain",
+            "--ignored=traditional",
+            "--untracked-files=normal",
+        ],
+    )?;
+    Some(
+        out.lines()
+            .filter_map(|l| l.strip_prefix("!! "))
+            .filter(|p| !p.trim_end_matches('"').ends_with('/'))
+            .count() as u32,
+    )
 }
 
 pub fn has_object(tree: &Path, oid: &str) -> bool {
