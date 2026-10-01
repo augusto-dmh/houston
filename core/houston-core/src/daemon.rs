@@ -12590,6 +12590,10 @@ impl Daemon {
             }
             crate::worktrees::validate_slug(&ask.slug)
                 .map_err(|e| anyhow!("spawn refused: {e}"))?;
+            if let Some(branch) = &ask.branch {
+                crate::git::validate_branch_name(branch)
+                    .map_err(|e| anyhow!("spawn refused: {e}"))?;
+            }
         }
         if handoff {
             if let Some(parent) = self.parent_of(caller) {

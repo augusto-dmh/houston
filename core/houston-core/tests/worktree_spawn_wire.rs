@@ -708,6 +708,40 @@ async fn a_worktree_deleted_by_hand_does_not_block_its_slug() {
 }
 
 #[tokio::test]
+async fn an_invalid_branch_is_refused_before_anything_is_created() {
+    let _guard = SERIAL.lock().await;
+    let r = rig("spawn-bad-branch", true).await;
+    let parent = r.pane();
+    let token = r.token_for(parent.id);
+    let before = r.session_count();
+
+    for branch in ["a..b", "x.lock", "-x"] {
+        let text = refusal_text(
+            &r.spawn(
+                &token,
+                serde_json::json!({
+                    "kind": "grok",
+                    "prompt": "go",
+                    "worktree": "demo",
+                    "branch": branch,
+                }),
+            )
+            .await,
+        );
+        assert!(
+            text.contains(&format!("{branch:?}")) && text.contains("branch name"),
+            "branch {branch:?} must be refused by name: {text}"
+        );
+    }
+    assert_eq!(r.session_count(), before);
+    assert!(r.rows().is_empty());
+    assert!(
+        !r.ws_dir.join(".houston").join("worktrees").exists(),
+        "a refused branch must not leave the worktrees dir behind"
+    );
+}
+
+#[tokio::test]
 async fn a_rollback_that_cannot_remove_the_tree_keeps_its_row() {
     let _guard = SERIAL.lock().await;
     let r = rig("spawn-stuck-rollback", true).await;
