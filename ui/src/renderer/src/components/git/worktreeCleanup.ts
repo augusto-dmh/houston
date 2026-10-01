@@ -72,6 +72,10 @@ export function isRemovable(entry: ManagedWorktreeInfo): boolean {
   return entry.checked_at_ms !== null && entry.keep === null
 }
 
+export function removablePaths(entries: ManagedWorktreeInfo[]): string[] {
+  return entries.filter(isRemovable).map((e) => e.path)
+}
+
 export function removableSummary(entries: ManagedWorktreeInfo[]): { count: number; bytes: number } {
   const removable = entries.filter(isRemovable)
   return {

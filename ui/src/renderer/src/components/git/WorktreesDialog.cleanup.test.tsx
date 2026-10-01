@@ -15,7 +15,10 @@ const HOUR = 3_600_000
 let root: Root | null = null
 let host: HTMLDivElement | null = null
 
-function mount(view: WorktreeCleanupView, overrides: { onCleanNow?: () => void; onRemove?: (p: string, f: boolean) => void } = {}): void {
+function mount(
+  view: WorktreeCleanupView,
+  overrides: { onCheck?: () => void; onCleanNow?: (paths: string[]) => void; onRemove?: (p: string, f: boolean) => void } = {}
+): void {
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
@@ -34,6 +37,7 @@ function mount(view: WorktreeCleanupView, overrides: { onCleanNow?: () => void; 
         onCreate={() => {}}
         onRemove={overrides.onRemove ?? (() => {})}
         onPrune={() => {}}
+        onCheckCleanup={overrides.onCheck ?? (() => {})}
         onCleanNow={overrides.onCleanNow ?? (() => {})}
         onAddWorkspace={() => {}}
         nowMs={NOW}
@@ -135,14 +139,16 @@ describe('WorktreesDialog cleanup section', () => {
     )
   })
 
-  it('clean now confirms before sending', () => {
+  it('clean now confirms before sending, and sends only what it listed', () => {
     const onCleanNow = vi.fn()
     mount(
       {
         status: 'ready',
         entries: [
           entry({ path: '/repo/.houston/worktrees/a', bytes: 1_500_000_000 }),
-          entry({ path: '/repo/.houston/worktrees/b', bytes: 2_000_000_000 })
+          entry({ path: '/repo/.houston/worktrees/b', bytes: 2_000_000_000 }),
+          entry({ path: '/repo/.houston/worktrees/kept', keep: { kind: 'dirty', files: 1 } }),
+          entry({ path: '/repo/.houston/worktrees/unchecked', checked_at_ms: null })
         ]
       },
       { onCleanNow }
@@ -156,6 +162,15 @@ describe('WorktreesDialog cleanup section', () => {
     const confirm = Array.from(document.querySelectorAll('button')).find((b) => b.textContent === 'Remove')
     click(confirm)
     expect(onCleanNow).toHaveBeenCalledTimes(1)
+    expect(onCleanNow).toHaveBeenCalledWith(['/repo/.houston/worktrees/a', '/repo/.houston/worktrees/b'])
+  })
+
+  it('check asks for a pass even when nothing is removable yet', () => {
+    const onCheck = vi.fn()
+    mount({ status: 'ready', entries: [entry({ checked_at_ms: null, keep: null })] }, { onCheck })
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="worktree-cleanup-run"]')?.disabled).toBe(true)
+    click(document.querySelector('[data-testid="worktree-cleanup-check"]'))
+    expect(onCheck).toHaveBeenCalledTimes(1)
   })
 
   it('no managed worktrees', () => {
@@ -196,7 +211,7 @@ describe('WorktreesDialog cleanup section', () => {
 })
 
 describe('useGitToolsSubscription cleanup calls', () => {
-  it('clean now and remove reach the client', async () => {
+  it('check, clean now and remove reach the client', async () => {
     const { useGitToolsSubscription } = await import('./useGitToolsSubscription')
     const calls: [string, ...unknown[]][] = []
     const client = new Proxy(
@@ -228,8 +243,10 @@ describe('useGitToolsSubscription cleanup calls', () => {
     root = createRoot(host)
     act(() => root!.render(<Harness />))
 
-    act(() => tools!.cleanNow())
-    expect(calls).toContainEqual(['worktreeCleanupRun', '/repo'])
+    act(() => tools!.checkCleanup())
+    expect(calls).toContainEqual(['worktreeCleanupRun', '/repo', []])
+    act(() => tools!.cleanNow(['/a']))
+    expect(calls).toContainEqual(['worktreeCleanupRun', '/repo', ['/a']])
     act(() => tools!.removeWorktree('/p', false))
     expect(calls).toContainEqual(['gitWorktreeRemove', '/repo', '/p', false])
   })

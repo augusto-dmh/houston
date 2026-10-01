@@ -42,7 +42,8 @@ export interface GitTools {
   createWorktree: (name: string, base: string | null) => void
   removeWorktree: (path: string, force: boolean) => void
   pruneWorktrees: () => void
-  cleanNow: () => void
+  checkCleanup: () => void
+  cleanNow: (paths: string[]) => void
   createCheckpoint: (label: string | null) => void
   inspectCheckpoint: (ref: string) => void
   restoreCheckpoint: (ref: string) => void
@@ -250,10 +251,15 @@ export function useGitToolsSubscription({
     createWorktree: (name, base) => withDir((dir) => client?.gitWorktreeCreate(dir, name, base)),
     removeWorktree: (path, force) => withDir((dir) => client?.gitWorktreeRemove(dir, path, force)),
     pruneWorktrees: () => withDir((dir) => client?.gitWorktreePrune(dir)),
-    cleanNow: () =>
+    checkCleanup: () =>
       withDir((dir) => {
         setCleanup({ status: 'pending' })
-        client?.worktreeCleanupRun(dir)
+        client?.worktreeCleanupRun(dir, [])
+      }),
+    cleanNow: (paths) =>
+      withDir((dir) => {
+        setCleanup({ status: 'pending' })
+        client?.worktreeCleanupRun(dir, paths)
       }),
     createCheckpoint: (label) =>
       withDir((dir) =>

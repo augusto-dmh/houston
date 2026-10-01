@@ -61,6 +61,7 @@ export function GitToolsDialogs({
           onCreate={(name, base) => tools.createWorktree(name, base)}
           onRemove={(path, force) => tools.removeWorktree(path, force)}
           onPrune={tools.pruneWorktrees}
+          onCheckCleanup={tools.checkCleanup}
           onCleanNow={tools.cleanNow}
           onAddWorkspace={onAddWorkspace}
         />

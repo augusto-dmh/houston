@@ -849,9 +849,9 @@ async fn dispatch(
             }
         }
         // The pass's own broadcast is the reply, so every open dialog sees the result.
-        proto::ClientMsg::WorktreeCleanupRun { dir } => {
+        proto::ClientMsg::WorktreeCleanupRun { dir, paths } => {
             let d = Arc::clone(daemon);
-            tokio::task::spawn_blocking(move || d.worktree_cleanup_run(&dir))
+            tokio::task::spawn_blocking(move || d.worktree_cleanup_run(&dir, paths))
                 .await
                 .unwrap_or_else(|e| Err(anyhow::anyhow!("worktree cleanup pass panicked: {e}")))
         }

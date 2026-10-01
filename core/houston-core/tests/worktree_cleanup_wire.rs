@@ -19,6 +19,9 @@ static FAKE: OnceLock<PathBuf> = OnceLock::new();
 
 const HOUR_MS: i64 = 3_600_000;
 const PR: u32 = 7;
+/// Every workspace's `origin` is configured with this URL, which an `insteadOf` rewrites
+/// to its local bare repository, so the PR's repository matches a real remote.
+const REPO_URL: &str = "https://github.com/acme/repo";
 
 /// A fake `gh` first on PATH: `pr view` answers from `pr-<branch, / as ->.json` or says
 /// there is no PR, and every call lands in `gh.log`. `GH_FAKE_MISSING` plays an absent
@@ -182,7 +185,15 @@ impl Rig {
         std::fs::write(dir.join("README.md"), "hello\n").unwrap();
         git(&dir, &["add", "-A"]);
         git(&dir, &["commit", "-m", "init"]);
-        git(&dir, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&dir, &["remote", "add", "origin", REPO_URL]);
+        git(
+            &dir,
+            &[
+                "config",
+                &format!("url.{}.insteadOf", origin.display()),
+                REPO_URL,
+            ],
+        );
         git(&dir, &["push", "-q", "-u", "origin", "main"]);
         let dir = dir.canonicalize().unwrap();
         self.daemon
@@ -273,7 +284,7 @@ fn pr_json(slug: &str, state: &str, merged_at_ms: Option<i64>, head: &str) {
     std::fs::write(
         fake_dir().join(format!("pr-houston-{slug}.json")),
         format!(
-            "{{\"number\":{PR},\"state\":\"{state}\",\"mergedAt\":{merged},\"headRefOid\":\"{head}\"}}"
+            "{{\"number\":{PR},\"state\":\"{state}\",\"mergedAt\":{merged},\"headRefOid\":\"{head}\",\"url\":\"{REPO_URL}/pull/{PR}\"}}"
         ),
     )
     .unwrap();
@@ -312,15 +323,18 @@ async fn next_cleanup(ws: &mut WsStream, dir: &Path) -> Result<proto::ServerMsg,
     }
 }
 
-async fn run(
+/// One `worktree_cleanup_run`: a check when `paths` is empty, else Clean now for them.
+async fn pass(
     r: &Rig,
     ws_dir: &Path,
+    paths: Vec<String>,
 ) -> (Vec<proto::ManagedWorktreeInfo>, Vec<proto::RemovedWorktree>) {
     let mut ws = r.ws().await;
     send(
         &mut ws,
         &proto::ClientMsg::WorktreeCleanupRun {
             dir: ws_dir.display().to_string(),
+            paths,
         },
     )
     .await;
@@ -329,8 +343,31 @@ async fn run(
             entries, removed, ..
         }) => (entries, removed),
         Ok(other) => panic!("unexpected {other:?}"),
-        Err(e) => panic!("clean now refused: {e}"),
+        Err(e) => panic!("cleanup pass refused: {e}"),
     }
+}
+
+fn removable(entries: &[proto::ManagedWorktreeInfo]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| e.checked_at_ms.is_some() && e.keep.is_none())
+        .map(|e| e.path.clone())
+        .collect()
+}
+
+/// What the dialog does: check, then Clean now for everything the check listed as
+/// removable. Returns the second pass's view.
+async fn run(
+    r: &Rig,
+    ws_dir: &Path,
+) -> (Vec<proto::ManagedWorktreeInfo>, Vec<proto::RemovedWorktree>) {
+    let (entries, removed) = pass(r, ws_dir, Vec::new()).await;
+    assert!(removed.is_empty(), "a check removes nothing: {removed:?}");
+    let paths = removable(&entries);
+    if paths.is_empty() {
+        return (entries, removed);
+    }
+    pass(r, ws_dir, paths).await
 }
 
 fn keep_of(entries: &[proto::ManagedWorktreeInfo], path: &Path) -> Option<proto::WorktreeKeep> {
@@ -609,6 +646,8 @@ async fn without_gh_a_gone_upstream_is_only_probably_integrated() {
     r.set_cleanup(true, 1);
     let tree = r.tree(&ws, "gone", true);
     git(&ws.origin, &["branch", "-D", "houston/gone"]);
+    // The operator's own fetch; Houston never prunes remote-tracking refs itself.
+    git(&ws.dir, &["fetch", "-q", "--prune", "origin"]);
     std::env::set_var("GH_FAKE_MISSING", "1");
 
     let (entries, removed) = run(&r, &ws.dir).await;
@@ -713,7 +752,10 @@ async fn a_second_clean_now_during_a_pass_is_refused() {
     let mut first = r.ws().await;
     send(
         &mut first,
-        &proto::ClientMsg::WorktreeCleanupRun { dir: dir.clone() },
+        &proto::ClientMsg::WorktreeCleanupRun {
+            dir: dir.clone(),
+            paths: vec![tree.display().to_string()],
+        },
     )
     .await;
     // Wait until the first pass is inside its `gh pr view`.
@@ -728,7 +770,10 @@ async fn a_second_clean_now_during_a_pass_is_refused() {
     let mut second = r.ws().await;
     send(
         &mut second,
-        &proto::ClientMsg::WorktreeCleanupRun { dir: dir.clone() },
+        &proto::ClientMsg::WorktreeCleanupRun {
+            dir: dir.clone(),
+            paths: Vec::new(),
+        },
     )
     .await;
     let err = next_cleanup(&mut second, &ws.dir)
@@ -752,7 +797,10 @@ async fn cleanup_for_an_unknown_workspace_is_refused() {
     let mut ws = r.ws().await;
 
     for msg in [
-        proto::ClientMsg::WorktreeCleanupRun { dir: dir.clone() },
+        proto::ClientMsg::WorktreeCleanupRun {
+            dir: dir.clone(),
+            paths: Vec::new(),
+        },
         proto::ClientMsg::WorktreeCleanupStatus { dir: dir.clone() },
     ] {
         send(&mut ws, &msg).await;
@@ -787,29 +835,64 @@ async fn the_boot_pass_removes_a_merged_tree_when_enabled() {
 }
 
 #[tokio::test]
-async fn with_cleanup_off_the_pass_only_reports() {
+async fn with_cleanup_off_the_loop_asks_fetches_and_measures_nothing() {
     let _guard = SERIAL.lock().await;
     let r = rig().await;
     let ws = r.workspace("ws");
     r.set_cleanup(false, 1);
-    let tree = r.tree(&ws, "report", true);
-    merged("report", &tree, 2);
+    let tree = r.tree(&ws, "idle", true);
+    merged("idle", &tree, 2);
     let mut client = r.ws().await;
 
     let d = Arc::clone(&r.daemon);
     tokio::task::spawn_blocking(move || d.worktree_cleanup_tick())
         .await
         .unwrap();
-    let Ok(proto::ServerMsg::WorktreeCleanup {
-        entries, removed, ..
-    }) = next_cleanup(&mut client, &ws.dir).await
+    assert!(gh_log().is_empty(), "no gh call: {}", gh_log());
+    send(
+        &mut client,
+        &proto::ClientMsg::WorktreeCleanupStatus {
+            dir: ws.dir.display().to_string(),
+        },
+    )
+    .await;
+    let Ok(proto::ServerMsg::WorktreeCleanup { entries, .. }) =
+        next_cleanup(&mut client, &ws.dir).await
     else {
-        panic!("expected a broadcast");
+        panic!("expected a status reply");
     };
-    assert!(removed.is_empty());
-    assert_eq!(keep_of(&entries, &tree), None);
-    assert!(entries[0].checked_at_ms.is_some());
+    assert_eq!(entries[0].checked_at_ms, None, "nothing was checked");
+    assert_eq!(entries[0].bytes, None, "nothing was measured");
     assert!(tree.exists());
+}
+
+#[tokio::test]
+async fn without_gh_a_pass_sends_nothing_and_leaves_remote_refs_alone() {
+    let _guard = SERIAL.lock().await;
+    let r = rig().await;
+    let ws = r.workspace("ws");
+    r.set_cleanup(true, 1);
+    let tree = r.tree(&ws, "stale", true);
+    git(&ws.origin, &["branch", "-D", "houston/stale"]);
+    std::env::set_var("GH_FAKE_MISSING", "1");
+
+    let (entries, _) = pass(&r, &ws.dir, Vec::new()).await;
+    let d = Arc::clone(&r.daemon);
+    tokio::task::spawn_blocking(move || d.worktree_cleanup_tick())
+        .await
+        .unwrap();
+    std::env::remove_var("GH_FAKE_MISSING");
+    assert!(
+        !git(&ws.dir, &["branch", "-r", "--list", "origin/houston/stale"]).is_empty(),
+        "the remote-tracking ref of a branch deleted upstream must not be pruned"
+    );
+    assert_eq!(
+        keep_of(&entries, &tree),
+        Some(proto::WorktreeKeep::GhUnavailable {
+            gh: proto::GhState::Missing
+        }),
+        "without the operator's own fetch the upstream still looks present"
+    );
 }
 
 #[tokio::test]
@@ -934,7 +1017,7 @@ async fn a_pass_measures_and_broadcasts_each_workspace() {
     let r = rig().await;
     let one = r.workspace("one");
     let two = r.workspace("two");
-    r.set_cleanup(false, 1);
+    r.set_cleanup(true, 1);
     let a = r.tree(&one, "a", true);
     let b = r.tree(&two, "b", true);
     let mut client = r.ws().await;
@@ -1067,7 +1150,7 @@ async fn a_pass_calls_gh_once_per_tree() {
     let _guard = SERIAL.lock().await;
     let r = rig().await;
     let ws = r.workspace("ws");
-    r.set_cleanup(false, 1);
+    r.set_cleanup(true, 1);
     for slug in ["x", "y", "z"] {
         let tree = r.tree(&ws, slug, true);
         pr_json(slug, "OPEN", None, &git(&tree, &["rev-parse", "HEAD"]));
@@ -1167,4 +1250,89 @@ async fn an_untracked_file_keeps_the_tree_even_when_status_hides_untracked_files
         Some(proto::WorktreeKeep::Dirty { files: 1 })
     );
     assert!(tree.join("notes.txt").exists());
+}
+
+#[tokio::test]
+async fn clean_now_removes_only_the_confirmed_paths() {
+    let _guard = SERIAL.lock().await;
+    let r = rig().await;
+    let ws = r.workspace("ws");
+    r.set_cleanup(false, 1);
+    let shown = r.tree(&ws, "shown", true);
+    merged("shown", &shown, 2);
+    let (entries, _) = pass(&r, &ws.dir, Vec::new()).await;
+    assert_eq!(removable(&entries), vec![shown.display().to_string()]);
+    // Another tree becomes removable after the operator's dialog was drawn.
+    let later = r.tree(&ws, "later", true);
+    merged("later", &later, 2);
+
+    let (entries, removed) = pass(&r, &ws.dir, vec![shown.display().to_string()]).await;
+    assert_eq!(
+        removed.iter().map(|w| w.path.clone()).collect::<Vec<_>>(),
+        vec![shown.display().to_string()]
+    );
+    assert!(later.exists());
+    assert_eq!(
+        keep_of(&entries, &later),
+        None,
+        "listed as removable, not removed"
+    );
+}
+
+#[tokio::test]
+async fn the_pr_head_is_fetched_only_from_the_pr_repository() {
+    let _guard = SERIAL.lock().await;
+    let r = rig().await;
+    let ws = r.workspace("ws");
+    r.set_cleanup(false, 1);
+    let tree = r.tree(&ws, "elsewhere", true);
+    // Only an unrelated remote carries a ref with the PR head; the PR's own does not.
+    let mirror = r.state.path().join("mirror.git");
+    git(
+        r.state.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            ws.origin.to_str().unwrap(),
+            mirror.to_str().unwrap(),
+        ],
+    );
+    let other = r.state.path().join("mirror-clone");
+    git(
+        r.state.path(),
+        &[
+            "clone",
+            "-q",
+            mirror.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    git(&other, &["config", "user.email", "t@t.local"]);
+    git(&other, &["config", "user.name", "t"]);
+    git(&other, &["checkout", "-q", "houston/elsewhere"]);
+    std::fs::write(other.join("fix.txt"), "x\n").unwrap();
+    git(&other, &["add", "-A"]);
+    git(&other, &["commit", "-q", "-m", "review fix"]);
+    let head = git(&other, &["rev-parse", "HEAD"]);
+    git(
+        &other,
+        &["push", "-q", "origin", &format!("HEAD:refs/pull/{PR}/head")],
+    );
+    git(
+        &ws.dir,
+        &["remote", "add", "mirror", mirror.to_str().unwrap()],
+    );
+    pr_json("elsewhere", "MERGED", Some(now_ms() - 2 * HOUR_MS), &head);
+
+    let (entries, removed) = run(&r, &ws.dir).await;
+    assert!(removed.is_empty(), "{removed:?}");
+    assert_eq!(
+        keep_of(&entries, &tree),
+        Some(proto::WorktreeKeep::PrHeadUnavailable { pr: PR })
+    );
+    assert!(
+        git(&ws.dir, &["branch", "-r", "--list", "mirror/*"]).is_empty(),
+        "nothing was fetched from the unrelated remote"
+    );
 }

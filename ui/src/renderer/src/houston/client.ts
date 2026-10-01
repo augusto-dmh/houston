@@ -757,8 +757,9 @@ export class HoustonClient {
     this.send({ type: 'worktree_cleanup_status', dir })
   }
 
-  worktreeCleanupRun(dir: string): void {
-    this.send({ type: 'worktree_cleanup_run', dir })
+  /** Removes only the confirmed `paths`; an empty list only checks. */
+  worktreeCleanupRun(dir: string, paths: string[]): void {
+    this.send({ type: 'worktree_cleanup_run', dir, paths })
   }
 
   gitCheckpointCreate(dir: string, label: string): void {

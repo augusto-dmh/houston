@@ -35,7 +35,8 @@ export interface WorktreesDialogProps {
   onCreate: (name: string, base: string | null) => void
   onRemove: (path: string, force: boolean) => void
   onPrune: () => void
-  onCleanNow: () => void
+  onCheckCleanup: () => void
+  onCleanNow: (paths: string[]) => void
   onAddWorkspace: (path: string) => void
   nowMs?: number
 }
@@ -53,6 +54,7 @@ export function WorktreesDialog({
   onCreate,
   onRemove,
   onPrune,
+  onCheckCleanup,
   onCleanNow,
   onAddWorkspace,
   nowMs
@@ -152,6 +154,7 @@ export function WorktreesDialog({
             view={cleanup}
             busy={busy}
             nowMs={nowMs ?? Date.now()}
+            onCheck={onCheckCleanup}
             onCleanNow={onCleanNow}
             onRemove={(path) => onRemove(path, false)}
           />

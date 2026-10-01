@@ -68,6 +68,8 @@ pub struct PrFacts {
     pub state: String,
     pub merged_at: Option<String>,
     pub head_oid: String,
+    /// The PR's page, which names the repository its `refs/pull/N/head` lives in.
+    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,14 +79,38 @@ pub enum PrLookup {
     Failed(String),
 }
 
+/// A cleanup pass runs unattended, so a `gh` that hangs on the network must not hold it.
+const PR_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// One `gh pr view` for the branch checked out in `dir`; the caller checks `state` first.
 pub fn pr_for_checkout(dir: &Path) -> PrLookup {
-    let out = match run(
-        dir,
-        &["pr", "view", "--json", "number,state,mergedAt,headRefOid"],
-    ) {
-        Ok(o) => o,
-        Err(e) => return PrLookup::Failed(format!("{e:#}")),
+    let args = [
+        "pr",
+        "view",
+        "--json",
+        "number,state,mergedAt,headRefOid,url",
+    ];
+    let mut cmd = crate::spawn::command("gh");
+    cmd.current_dir(dir)
+        .args(args)
+        .env("GH_PROMPT_DISABLED", "1");
+    let out = match crate::spawn::output_within(cmd, PR_LOOKUP_TIMEOUT) {
+        Ok(Some(o)) => Output {
+            ok: o.status.success(),
+            code: o.status.code(),
+            stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+        },
+        Ok(None) => {
+            return PrLookup::Failed(format!(
+                "gh pr view in {} gave no answer within {} s",
+                dir.display(),
+                PR_LOOKUP_TIMEOUT.as_secs()
+            ))
+        }
+        Err(e) => {
+            return PrLookup::Failed(format!("spawning gh {args:?} in {}: {e}", dir.display()))
+        }
     };
     if !out.ok {
         if out.stderr.contains("no pull requests found") {
@@ -99,15 +125,17 @@ pub fn pr_for_checkout(dir: &Path) -> PrLookup {
     let number = v["number"].as_u64().and_then(|n| u32::try_from(n).ok());
     let state = v["state"].as_str();
     let head = v["headRefOid"].as_str();
-    match (number, state, head) {
-        (Some(number), Some(state), Some(head)) => PrLookup::Found(PrFacts {
+    let url = v["url"].as_str();
+    match (number, state, head, url) {
+        (Some(number), Some(state), Some(head), Some(url)) => PrLookup::Found(PrFacts {
             number,
             state: state.to_string(),
             merged_at: v["mergedAt"].as_str().map(str::to_string),
             head_oid: head.to_string(),
+            url: url.to_string(),
         }),
         _ => PrLookup::Failed(format!(
-            "gh pr view left out a field: {}",
+            "gh pr view left out one of number, state, headRefOid, url: {}",
             out.stdout.trim()
         )),
     }

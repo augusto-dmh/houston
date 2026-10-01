@@ -382,12 +382,17 @@ In memory only, by design: live `sessions` and restored `dead` husks; `swarm_act
 
 `boot::spawn_background_loops` is called only by the daemon host and spawns five tasks:
 `swarm_mail_loop`, `delegation_watch_loop`, `routine_fire_loop`, `update_check_loop` and
-`worktree_cleanup_loop`. The last runs one pass at boot and every 6 h over each workspace
-with rows in `managed_worktrees`: it works out why each recorded worktree stays
-(`WorktreeKeep`), measures it, removes the ones nothing keeps while
-`worktree_cleanup_enabled` is on, and broadcasts `worktree_cleanup` per workspace. Clean now
-(`worktree_cleanup_run`) is the same pass with removal forced on; a workspace mid-pass
-refuses a second one.
+`worktree_cleanup_loop`. While `worktree_cleanup_enabled` is on, the last runs one pass at
+boot and every 6 h over each workspace with rows in `managed_worktrees`: it works out why
+each recorded worktree stays (`WorktreeKeep`), measures it, removes the ones nothing keeps
+and broadcasts `worktree_cleanup` per workspace. While the setting is off the loop does no
+work, since a pass calls `gh` and may fetch. `worktree_cleanup_run` is the same pass on
+demand: it removes only the confirmed `paths`, so a tree that became removable after the
+dialog was drawn is not removed unseen. A workspace mid-pass refuses a second one, and the
+claim is released on drop so a panicking pass cannot block later ones. Removal deletes the
+recorded branch, so a tree whose checkout moved to another branch is kept: its PR lookup
+and ancestry check would describe a different branch. Each `git` and `gh` call in a pass is
+bounded by a timeout and runs without a terminal prompt.
 `swarm_mail_loop` carries two jobs per round — `hook_drop_tick` first, then
 a `plan/events/` GC sweep gated to `SWARM_MAIL_GC_SWEEP_INTERVAL_MS`. Mail delivery uses
 `pane_inbox` `Mail` rows and the shared inbox delivery paths. The loop lists the legacy

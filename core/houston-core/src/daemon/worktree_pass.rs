@@ -38,6 +38,41 @@ struct CleanupWorkspace {
     common_dir: Option<String>,
 }
 
+/// Which of the trees nothing keeps a pass removes.
+enum Removal {
+    None,
+    All,
+    /// Clean now: only what the operator saw listed as removable and confirmed.
+    Only(HashSet<String>),
+}
+
+impl Removal {
+    fn covers(&self, path: &str) -> bool {
+        match self {
+            Removal::None => false,
+            Removal::All => true,
+            Removal::Only(paths) => paths.contains(path),
+        }
+    }
+}
+
+/// Holds a workspace's pass; dropping it frees the workspace even if the pass panics.
+struct PassClaim<'a> {
+    daemon: &'a Daemon,
+    key: String,
+}
+
+impl Drop for PassClaim<'_> {
+    fn drop(&mut self) {
+        self.daemon
+            .worktree_cleanup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .running
+            .remove(&self.key);
+    }
+}
+
 impl Daemon {
     pub fn worktree_cleanup_enabled(&self) -> bool {
         matches!(self.db.get_setting(ENABLED_KEY), Ok(Some(v)) if v == "1")
@@ -72,20 +107,29 @@ impl Daemon {
         Ok(self.cleanup_message(&ws, Vec::new()))
     }
 
-    /// Clean now: removes whatever nothing keeps, with the setting on or off.
-    pub fn worktree_cleanup_run(&self, dir: &str) -> Result<()> {
+    /// Check (`paths` empty) or Clean now, with the setting on or off: removes only the
+    /// confirmed `paths` this pass still finds nothing keeping.
+    pub fn worktree_cleanup_run(&self, dir: &str, paths: Vec<String>) -> Result<()> {
         let ws = self.cleanup_workspace(dir)?;
-        self.claim_pass(&ws)?;
-        let removed = self.cleanup_pass(&ws, true);
-        self.release_pass(&ws);
+        let removal = if paths.is_empty() {
+            Removal::None
+        } else {
+            Removal::Only(paths.into_iter().collect())
+        };
+        let claim = self.claim_pass(&ws)?;
+        let removed = self.cleanup_pass(&ws, &removal);
+        drop(claim);
         self.broadcast_control(&self.cleanup_message(&ws, removed));
         Ok(())
     }
 
-    /// One pass of the loop: every workspace with managed worktrees, removing only
-    /// while the setting is on. A workspace already mid-pass is skipped.
+    /// One pass of the loop over every workspace with managed worktrees. With the
+    /// setting off it does nothing at all: no `gh`, no fetch, no measuring. A workspace
+    /// already mid-pass is skipped.
     pub fn worktree_cleanup_tick(&self) {
-        let remove = self.worktree_cleanup_enabled();
+        if !self.worktree_cleanup_enabled() {
+            return;
+        }
         let rows = self.db.managed_worktrees().unwrap_or_default();
         for ws in self.cleanup_workspaces() {
             if !rows
@@ -94,11 +138,11 @@ impl Daemon {
             {
                 continue;
             }
-            if self.claim_pass(&ws).is_err() {
+            let Ok(claim) = self.claim_pass(&ws) else {
                 continue;
-            }
-            let removed = self.cleanup_pass(&ws, remove);
-            self.release_pass(&ws);
+            };
+            let removed = self.cleanup_pass(&ws, &Removal::All);
+            drop(claim);
             self.broadcast_control(&self.cleanup_message(&ws, removed));
         }
     }
@@ -137,20 +181,15 @@ impl Daemon {
             })
     }
 
-    fn claim_pass(&self, ws: &CleanupWorkspace) -> Result<()> {
+    fn claim_pass(&self, ws: &CleanupWorkspace) -> Result<PassClaim<'_>> {
         let mut state = self.worktree_cleanup.lock().expect("worktree cleanup lock");
         if !state.running.insert(ws.key.clone()) {
             bail!("a worktree cleanup pass is already running for {}", ws.key);
         }
-        Ok(())
-    }
-
-    fn release_pass(&self, ws: &CleanupWorkspace) {
-        self.worktree_cleanup
-            .lock()
-            .expect("worktree cleanup lock")
-            .running
-            .remove(&ws.key);
+        Ok(PassClaim {
+            daemon: self,
+            key: ws.key.clone(),
+        })
     }
 
     fn rows_of(&self, ws: &CleanupWorkspace) -> Vec<ManagedWorktreeRow> {
@@ -194,15 +233,16 @@ impl Daemon {
         }
     }
 
-    fn cleanup_pass(&self, ws: &CleanupWorkspace, remove: bool) -> Vec<proto::RemovedWorktree> {
+    fn cleanup_pass(
+        &self,
+        ws: &CleanupWorkspace,
+        removal: &Removal,
+    ) -> Vec<proto::RemovedWorktree> {
         let rows = self.rows_of(ws);
         if rows.is_empty() {
             return Vec::new();
         }
         let gh = crate::gh::state(&ws.dir);
-        if gh != proto::GhState::Ready {
-            wc::fetch_prune(&ws.dir);
-        }
         let grace_ms = i64::from(self.worktree_cleanup_grace_hours()) * 3_600_000;
         let live = self.live_session_cwds();
         let mut removed = Vec::new();
@@ -223,27 +263,29 @@ impl Daemon {
                 .db
                 .managed_worktree_set_size(&row.path, bytes as i64, now);
             let keep = match keep {
-                None if remove => match remove_managed(ws, &row, &path, &self.db) {
-                    Ok(()) => {
-                        tracing::info!(
-                            "removed merged worktree {} (branch {}, PR #{}, {bytes} bytes)",
-                            row.path,
-                            row.branch,
-                            pr.unwrap_or(0)
-                        );
-                        self.forget_checked(&row.path);
-                        removed.push(proto::RemovedWorktree {
-                            path: row.path,
-                            branch: row.branch,
-                            pr,
-                            bytes: Some(bytes),
-                        });
-                        continue;
+                None if removal.covers(&row.path) => {
+                    match remove_managed(ws, &row, &path, &self.db) {
+                        Ok(()) => {
+                            tracing::info!(
+                                "removed merged worktree {} (branch {}, PR #{}, {bytes} bytes)",
+                                row.path,
+                                row.branch,
+                                pr.unwrap_or(0)
+                            );
+                            self.forget_checked(&row.path);
+                            removed.push(proto::RemovedWorktree {
+                                path: row.path,
+                                branch: row.branch,
+                                pr,
+                                bytes: Some(bytes),
+                            });
+                            continue;
+                        }
+                        Err(e) => Some(WorktreeKeep::RemoveFailed {
+                            message: format!("{e:#}"),
+                        }),
                     }
-                    Err(e) => Some(WorktreeKeep::RemoveFailed {
-                        message: format!("{e:#}"),
-                    }),
-                },
+                }
                 other => other,
             };
             self.worktree_cleanup
@@ -359,7 +401,8 @@ fn keep_reason(
         }
     }
     let head_here = wc::has_object(path, &facts.head_oid)
-        || wc::fetch_pr_head(path, facts.number, &facts.head_oid);
+        || wc::pr_remote(path, &facts.url)
+            .is_some_and(|remote| wc::fetch_pr_head(path, &remote, facts.number, &facts.head_oid));
     let outside = head_here
         .then(|| wc::commits_outside(path, &facts.head_oid))
         .flatten();

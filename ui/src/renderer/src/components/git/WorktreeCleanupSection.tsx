@@ -5,6 +5,7 @@ import { FIELD_LABEL } from '../nav/navChrome'
 import {
   cleanNowConfirm,
   cleanupHeader,
+  removablePaths,
   removableSummary,
   sizeLine,
   statusLine,
@@ -15,18 +16,21 @@ export interface WorktreeCleanupSectionProps {
   view: WorktreeCleanupView
   busy: boolean
   nowMs: number
-  onCleanNow: () => void
+  onCheck: () => void
+  onCleanNow: (paths: string[]) => void
   onRemove: (path: string) => void
 }
 
 const MUTED = 'm-0 text-[length:var(--tr-text-small-size)] text-[var(--text-muted)]'
 
 // The worktrees Houston created and may remove once their PR merges. Everything
-// here comes from the daemon's last pass; nothing is measured on open.
+// here comes from the daemon's last pass; nothing is measured on open. Clean now sends
+// the paths its confirmation listed, so the daemon removes nothing the operator did not see.
 export function WorktreeCleanupSection({
   view,
   busy,
   nowMs,
+  onCheck,
   onCleanNow,
   onRemove
 }: WorktreeCleanupSectionProps): React.JSX.Element {
@@ -51,6 +55,15 @@ export function WorktreeCleanupSection({
           <span data-testid="worktree-cleanup-header" className="flex-1 text-[length:var(--tr-text-small-size)] text-[var(--text-primary)]">
             {cleanupHeader(entries)}
           </span>
+          <button
+            type="button"
+            className={`btn ${BTN_GHOST}`}
+            data-testid="worktree-cleanup-check"
+            disabled={busy}
+            onClick={onCheck}
+          >
+            Check
+          </button>
           <button
             type="button"
             className={`btn ${BTN_GHOST}`}
@@ -106,7 +119,7 @@ export function WorktreeCleanupSection({
             confirmLabel="Remove"
             onConfirm={() => {
               setConfirming(false)
-              onCleanNow()
+              onCleanNow(removablePaths(entries))
             }}
             onCancel={() => setConfirming(false)}
           />

@@ -2545,9 +2545,12 @@ pub enum ClientMsg {
     WorktreeCleanupStatus {
         dir: String,
     },
-    /// Clean now: one pass over `dir` that removes what can go, whatever the setting.
+    /// One pass over `dir`, whatever the setting: it removes the `paths` the operator
+    /// confirmed that it still finds removable, and only checks when `paths` is empty.
     WorktreeCleanupRun {
         dir: String,
+        #[serde(default)]
+        paths: Vec<String>,
     },
     GitCheckpointCreate {
         dir: String,
